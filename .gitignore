@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Project specific - API 키 값은 Secrets/환경변수로 설정 (gemini_key.py는 커밋된 버전 사용)
+
+# Data files
+data/*.xlsx
+data/*.db
+data/step2_records/*.xlsx
+data/step2_records/*.json
+data/*.pkl
+
+# Temporary files
+*.tmp
+*.log
+*.bak
