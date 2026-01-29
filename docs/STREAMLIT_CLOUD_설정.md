@@ -1,5 +1,10 @@
 # Streamlit Cloud에서 앱이 안 열릴 때
 
+## 0. "로딩만 계속되는" 경우
+
+- **Main file path**를 반드시 **`run.py`**로 두세요. `run.py`는 먼저 "앱을 불러오는 중…"을 띄운 뒤 앱을 로드해, 첫 응답이 빨리 나가도록 되어 있습니다.
+- **Run command**: `streamlit run run.py --server.headless true` (또는 기본값 `streamlit run run.py`)
+
 ## 1. 메인 파일을 `run.py`로 설정
 
 Streamlit Cloud 대시보드에서:

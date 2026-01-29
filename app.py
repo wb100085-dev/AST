@@ -3893,12 +3893,14 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    try:
-        db_init()
-        st.session_state.pop("db_init_error", None)
-    except Exception as e:
-        st.session_state.db_init_error = str(e)
-    ensure_session_state()
+    # 배포 환경에서 첫 응답을 빨리 보내기 위해, DB 초기화를 스피너 안에서 실행
+    with st.spinner("준비 중…"):
+        try:
+            db_init()
+            st.session_state.pop("db_init_error", None)
+        except Exception as e:
+            st.session_state.db_init_error = str(e)
+        ensure_session_state()
 
     if not st.session_state.get("app_started", False):
         render_landing()

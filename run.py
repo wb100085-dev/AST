@@ -1,11 +1,20 @@
 """
 Streamlit Cloud / 배포용 진입 스크립트.
-import 오류가 나도 화면에 오류 메시지가 보이도록 합니다.
+- 첫 응답을 빨리 보내서 "무한 로딩"처럼 보이지 않도록, 먼저 "로딩 중"을 띄운 뒤 앱을 불러옵니다.
 실행: streamlit run run.py
 """
 import streamlit as st
 
 st.set_page_config(page_title="AI Social Twin", layout="wide")
+
+# 첫 방문 시 "로딩 중"만 먼저 보여주고 rerun → 다음 요청에서 무거운 app 로드 (인터넷에서 끊기지 않도록)
+if "run_loading_started" not in st.session_state:
+    st.session_state.run_loading_started = False
+
+if not st.session_state.run_loading_started:
+    st.info("앱을 불러오는 중입니다… 잠시만 기다려 주세요.")
+    st.session_state.run_loading_started = True
+    st.rerun()
 
 try:
     from app import main
