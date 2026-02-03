@@ -105,6 +105,11 @@ def generate_korean_name(gender: str = None) -> str:
     # 중복 제거로 고유 조합 수 확대 (성 30 × 고유 이름 수)
     male_first = list(dict.fromkeys(male_first))
     female_first = list(dict.fromkeys(female_first))
+    return _name_from_pools(male_first, female_first, last_names, gender)
+
+
+def _name_from_pools(male_first: list, female_first: list, last_names: list, gender: str = None) -> str:
+    """미리 구축된 이름 풀에서 이름 1개 반환 (반복 호출 시 풀 재구축 비용 제거)."""
     last = random.choice(last_names)
     if gender == "남자":
         first = random.choice(male_first)
@@ -162,11 +167,8 @@ def apply_realistic_constraints(df: pd.DataFrame) -> pd.DataFrame:
         if adjust_count > 0:
             adjust_indices = df[elderly_econ].sample(n=adjust_count, random_state=42).index
             df.loc[adjust_indices, '경제활동'] = '비경제활동'
-            # 비경제활동으로 변경된 경우 소득도 낮게 조정
             low_income_options = ['50만원미만', '50-100만원', '100-200만원']
-            df.loc[adjust_indices, '월평균소득'] = df.loc[adjust_indices].apply(
-                lambda x: random.choice(low_income_options), axis=1
-            )
+            df.loc[adjust_indices, '월평균소득'] = np.random.choice(low_income_options, size=adjust_count, p=[1/3, 1/3, 1/3])
             print(f"   ✅ 고령자 경제활동 → 비경제활동 조정: {adjust_count}건")
     
     # 🔹 규칙 2: 비경제활동 → 저소득으로 제한 (절대적)
@@ -176,11 +178,10 @@ def apply_realistic_constraints(df: pd.DataFrame) -> pd.DataFrame:
     )
     
     if non_econ_high_income.sum() > 0:
+        n_adj = non_econ_high_income.sum()
         low_income_options = ['50만원미만', '50-100만원', '100-200만원', '200-300만원']
-        df.loc[non_econ_high_income, '월평균소득'] = df.loc[non_econ_high_income].apply(
-            lambda x: random.choice(low_income_options), axis=1
-        )
-        print(f"   ✅ 비경제활동 고소득 조정: {non_econ_high_income.sum()}건")
+        df.loc[non_econ_high_income, '월평균소득'] = np.random.choice(low_income_options, size=n_adj, p=[0.25, 0.25, 0.25, 0.25])
+        print(f"   ✅ 비경제활동 고소득 조정: {n_adj}건")
     
     # 🔹 규칙 3: 청년(20-35세) + 경제활동 → 적정 소득 보장
     young_econ_low_income = (
@@ -190,11 +191,10 @@ def apply_realistic_constraints(df: pd.DataFrame) -> pd.DataFrame:
     )
     
     if young_econ_low_income.sum() > 0:
+        n_adj = young_econ_low_income.sum()
         young_income_options = ['100-200만원', '200-300만원', '300-400만원']
-        df.loc[young_econ_low_income, '월평균소득'] = df.loc[young_econ_low_income].apply(
-            lambda x: random.choice(young_income_options), axis=1
-        )
-        print(f"   ✅ 청년 경제활동 저소득 조정: {young_econ_low_income.sum()}건")
+        df.loc[young_econ_low_income, '월평균소득'] = np.random.choice(young_income_options, size=n_adj, p=[1/3, 1/3, 1/3])
+        print(f"   ✅ 청년 경제활동 저소득 조정: {n_adj}건")
     
     # 🔹 규칙 4: 중장년(36-55세) + 경제활동 → 중상위 소득
     middle_age_econ = (
@@ -204,11 +204,10 @@ def apply_realistic_constraints(df: pd.DataFrame) -> pd.DataFrame:
     )
     
     if middle_age_econ.sum() > 0:
+        n_adj = middle_age_econ.sum()
         middle_income_options = ['300-400만원', '400-500만원', '500-600만원']
-        df.loc[middle_age_econ, '월평균소득'] = df.loc[middle_age_econ].apply(
-            lambda x: random.choice(middle_income_options), axis=1
-        )
-        print(f"   ✅ 중장년 경제활동 저소득 조정: {middle_age_econ.sum()}건")
+        df.loc[middle_age_econ, '월평균소득'] = np.random.choice(middle_income_options, size=n_adj, p=[1/3, 1/3, 1/3])
+        print(f"   ✅ 중장년 경제활동 저소득 조정: {n_adj}건")
     
     # 🔹 규칙 5: 고령자(65+) + 대졸이상 → 희소 (20%로 제한)
     elderly_college = (
@@ -222,9 +221,7 @@ def apply_realistic_constraints(df: pd.DataFrame) -> pd.DataFrame:
         
         if adjust_count > 0:
             adjust_indices = df[elderly_college].sample(n=adjust_count, random_state=42).index
-            df.loc[adjust_indices, '교육정도'] = df.loc[adjust_indices].apply(
-                lambda x: random.choice(['고졸', '중졸이하']), axis=1
-            )
+            df.loc[adjust_indices, '교육정도'] = np.random.choice(['고졸', '중졸이하'], size=adjust_count, p=[0.5, 0.5])
             print(f"   ✅ 고령자 대졸 비율 조정: {adjust_count}건")
     
     # 🔹 규칙 6: 대졸 초년생(20-25세) → 적정 소득
@@ -235,10 +232,9 @@ def apply_realistic_constraints(df: pd.DataFrame) -> pd.DataFrame:
     )
     
     if young_college.sum() > 0:
-        df.loc[young_college, '월평균소득'] = df.loc[young_college].apply(
-            lambda x: random.choice(['100-200만원', '200-300만원', '300-400만원']), axis=1
-        )
-        print(f"   ✅ 대졸 초년생 고소득 조정: {young_college.sum()}건")
+        n_adj = young_college.sum()
+        df.loc[young_college, '월평균소득'] = np.random.choice(['100-200만원', '200-300만원', '300-400만원'], size=n_adj, p=[1/3, 1/3, 1/3])
+        print(f"   ✅ 대졸 초년생 고소득 조정: {n_adj}건")
     
     # 🔹 규칙 7: 중장년(36-55세) + 비경제활동 → 매우 낮은 소득
     middle_age_non_econ = (
@@ -248,11 +244,10 @@ def apply_realistic_constraints(df: pd.DataFrame) -> pd.DataFrame:
     )
     
     if middle_age_non_econ.sum() > 0:
+        n_adj = middle_age_non_econ.sum()
         very_low_income_options = ['50만원미만', '50-100만원', '100-200만원']
-        df.loc[middle_age_non_econ, '월평균소득'] = df.loc[middle_age_non_econ].apply(
-            lambda x: random.choice(very_low_income_options), axis=1
-        )
-        print(f"   ✅ 중장년 비경제활동 고소득 조정: {middle_age_non_econ.sum()}건")
+        df.loc[middle_age_non_econ, '월평균소득'] = np.random.choice(very_low_income_options, size=n_adj, p=[1/3, 1/3, 1/3])
+        print(f"   ✅ 중장년 비경제활동 고소득 조정: {n_adj}건")
     
     # 🔹 규칙 8: 고령자(65+) + 비경제활동 → 매우 낮은 소득
     elderly_non_econ = (
@@ -262,11 +257,10 @@ def apply_realistic_constraints(df: pd.DataFrame) -> pd.DataFrame:
     )
     
     if elderly_non_econ.sum() > 0:
+        n_adj = elderly_non_econ.sum()
         very_low_income_options = ['50만원미만', '50-100만원', '100-200만원']
-        df.loc[elderly_non_econ, '월평균소득'] = df.loc[elderly_non_econ].apply(
-            lambda x: random.choice(very_low_income_options), axis=1
-        )
-        print(f"   ✅ 고령자 비경제활동 고소득 조정: {elderly_non_econ.sum()}건")
+        df.loc[elderly_non_econ, '월평균소득'] = np.random.choice(very_low_income_options, size=n_adj, p=[1/3, 1/3, 1/3])
+        print(f"   ✅ 고령자 비경제활동 고소득 조정: {n_adj}건")
     
     # 🔹 규칙 9: 20세 미만 제거
     under_20 = df['연령'] < 20
@@ -736,21 +730,23 @@ def generate_base_population(
     
     df = pd.DataFrame(data)
     
-    # ✅ 성별에 맞는 가상이름 생성 (풀: 성 30×이름 350+ = 1만 명 이상 고유, 고갈 시 접미사로 보장)
+    # ✅ 성별에 맞는 가상이름 생성 (풀 1회만 구축해 반복 호출 비용 제거)
+    male_first, female_first, last_names = _build_extended_name_pools()
+    male_first = list(dict.fromkeys(male_first))
+    female_first = list(dict.fromkeys(female_first))
     used_names = set()
     names = []
-    max_attempts = 1000  # 확장된 풀 크기 대비
+    max_attempts = 1000
     for idx, gender in enumerate(df['성별']):
-        name = generate_korean_name(gender)
+        name = _name_from_pools(male_first, female_first, last_names, gender)
         attempts = 0
         while name in used_names and attempts < max_attempts:
-            name = generate_korean_name(gender)
+            name = _name_from_pools(male_first, female_first, last_names, gender)
             attempts += 1
         if name in used_names:
             name = f"{name}_{idx + 1}"
         used_names.add(name)
         names.append(name)
-    
     df['가상이름'] = names
     
     # ✅ 컬럼 순서 고정: 식별NO, 가상이름 순으로

@@ -18,7 +18,9 @@ from core.constants import (
 )
 
 
+@st.cache_resource
 def db_conn():
+    """세션 동안 재사용되는 DB 연결. 캐시된 연결이므로 호출부에서 close()하지 않음."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -169,7 +171,6 @@ def db_init():
     )
 
     conn.commit()
-    conn.close()
 
 
 @st.cache_data(ttl=60)
@@ -195,7 +196,6 @@ def db_list_stats_by_sido(sido_code: str, active_only: bool = False) -> List[Dic
             # ux_stats_sido_category_name (sido_code, category, name)
             cur.execute("SELECT * FROM stats WHERE sido_code=? ORDER BY category, name", (sido_code,))
     rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
     return rows
 
 
@@ -220,7 +220,6 @@ def db_upsert_stat(sido_code: str, category: str, name: str, url: str, is_active
         (sido_code, category, name, url, is_active),
     )
     conn.commit()
-    conn.close()
 
 
 def db_delete_stat_by_id(stat_id: int):
@@ -228,7 +227,6 @@ def db_delete_stat_by_id(stat_id: int):
     cur = conn.cursor()
     cur.execute("DELETE FROM stats WHERE id=?", (int(stat_id),))
     conn.commit()
-    conn.close()
 
 
 def db_update_stat_by_id(stat_id: int, category: str, name: str, url: str, is_active: int):
@@ -243,7 +241,6 @@ def db_update_stat_by_id(stat_id: int, category: str, name: str, url: str, is_ac
         (category.strip(), name.strip(), url.strip(), int(is_active), int(stat_id)),
     )
     conn.commit()
-    conn.close()
 
 
 @st.cache_data(ttl=60)
@@ -260,7 +257,6 @@ def db_get_axis_margin_stats(sido_code: str, axis_key: str) -> Optional[Dict[str
         (sido_code, axis_key),
     )
     row = cur.fetchone()
-    conn.close()
     return dict(row) if row else None
 
 
@@ -290,7 +286,6 @@ def db_upsert_axis_margin_stat(sido_code: str, axis_key: str, stat_id: int):
         (sido_code, axis_key, int(stat_id)),
     )
     conn.commit()
-    conn.close()
 
 
 def db_upsert_template(sido_code: str, filename: str, file_bytes: bytes):
@@ -309,7 +304,6 @@ def db_upsert_template(sido_code: str, filename: str, file_bytes: bytes):
         (sido_code, filename, file_bytes),
     )
     conn.commit()
-    conn.close()
 
 
 @st.cache_data(ttl=60)
@@ -326,7 +320,6 @@ def db_get_template(sido_code: str) -> Optional[Dict[str, Any]]:
         (sido_code,),
     )
     row = cur.fetchone()
-    conn.close()
 
     if row:
         return {
@@ -440,10 +433,12 @@ def _vpd_record_has_persona_and_contemporary(data_json: bytes | str) -> bool:
         return False
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def list_virtual_population_db_records(sido_code: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     가상인구 DB에서 페르소나·현시대 반영이 된 목록만 반환.
     sido_code가 있으면 해당 시도만, 없으면 전부.
+    캐시 오염 방지를 위해 복사본 리스트 반환.
     """
     conn = db_conn()
     cur = conn.cursor()
@@ -457,7 +452,6 @@ def list_virtual_population_db_records(sido_code: Optional[str] = None) -> List[
             "SELECT id, sido_code, sido_name, record_timestamp, record_excel_path, data_json FROM virtual_population_db ORDER BY added_at",
         )
     rows = cur.fetchall()
-    conn.close()
 
     out = []
     for row in rows:
@@ -477,11 +471,12 @@ def list_virtual_population_db_records(sido_code: Optional[str] = None) -> List[
             })
         except Exception:
             continue
-    return out
+    return [dict(item) for item in out]
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_virtual_population_db_record_by_id(record_id: int) -> Optional[Dict[str, Any]]:
-    """가상인구 DB에서 id로 한 건 조회. DataFrame과 메타 반환."""
+    """가상인구 DB에서 id로 한 건 조회. DataFrame과 메타 반환. 캐시 오염 방지를 위해 df 복사본 반환."""
     conn = db_conn()
     cur = conn.cursor()
     cur.execute(
@@ -489,7 +484,6 @@ def get_virtual_population_db_record_by_id(record_id: int) -> Optional[Dict[str,
         (int(record_id),),
     )
     row = cur.fetchone()
-    conn.close()
     if not row:
         return None
     try:
@@ -500,7 +494,7 @@ def get_virtual_population_db_record_by_id(record_id: int) -> Optional[Dict[str,
             "sido_name": row[2],
             "record_timestamp": row[3],
             "record_excel_path": row[4],
-            "df": df,
+            "df": df.copy(),
             "rows": len(df),
             "columns_count": len(df.columns),
         }
@@ -508,10 +502,11 @@ def get_virtual_population_db_record_by_id(record_id: int) -> Optional[Dict[str,
         return None
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_virtual_population_db_combined_df(sido_code: str):
     """
     해당 시도의 가상인구 DB 중 페르소나·현시대 반영된 기록을 모두 합쳐 하나의 DataFrame으로 반환.
-    없으면 None.
+    없으면 None. 캐시 오염 방지를 위해 복사본 반환.
     """
     conn = db_conn()
     cur = conn.cursor()
@@ -520,7 +515,6 @@ def get_virtual_population_db_combined_df(sido_code: str):
         (sido_code,),
     )
     rows = cur.fetchall()
-    conn.close()
 
     dfs = []
     for row in rows:
@@ -549,14 +543,16 @@ def get_virtual_population_db_combined_df(sido_code: str):
         combined = combined.loc[persona_ok & cont_ok].reset_index(drop=True)
     if combined.empty:
         return None
-    return combined
+    return combined.copy()
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_sido_vdb_stats() -> Dict[str, Dict[str, Any]]:
     """
     시도별 가상인구 DB 통계. 전국(00) 제외.
     반환: { sido_code: { "sido_name", "vdb_count" } }
     vdb_count = 해당 시도 virtual_population_db의 모든 기록에서의 총 인원 수(행 수 합계).
+    캐시 오염 방지를 위해 복사본 반환.
     """
     conn = db_conn()
     cur = conn.cursor()
@@ -564,7 +560,6 @@ def get_sido_vdb_stats() -> Dict[str, Dict[str, Any]]:
         "SELECT sido_code, sido_name, data_json FROM virtual_population_db"
     )
     rows = cur.fetchall()
-    conn.close()
 
     out: Dict[str, Dict[str, Any]] = {}
     for row in rows:
@@ -580,4 +575,4 @@ def get_sido_vdb_stats() -> Dict[str, Dict[str, Any]]:
         if sido_code not in out:
             out[sido_code] = {"sido_name": sido_name, "vdb_count": 0}
         out[sido_code]["vdb_count"] = out[sido_code]["vdb_count"] + n
-    return out
+    return {k: dict(v) for k, v in out.items()}

@@ -18,12 +18,6 @@ from utils.gemini_client import GeminiClient
 
 
 @st.cache_data(ttl=60)
-def _cached_sido_vdb_stats():
-    """시도별 가상인구 DB 통계 캐싱 (재실행 시 데이터 재로드 방지)"""
-    return get_sido_vdb_stats()
-
-
-@st.cache_data(ttl=60)
 def _cached_sido_master():
     """시도 마스터 목록 캐싱"""
     return get_sido_master()
@@ -43,13 +37,22 @@ def _find_koreamap_svg() -> str | None:
     return None
 
 
-def _render_korea_map(selected_sido_code: str):
-    """koreamap.svg 기반 인터랙티브 지도. 기본 그레이, 호버 검정, 선택 붉은색. 클릭 시 쿼리로 연동."""
+@st.cache_data(ttl=3600)
+def _cached_koreamap_svg_content() -> str | None:
+    """koreamap.svg 내용 캐시 (지도 재렌더 시 파일 반복 읽기 방지)."""
     svg_path = _find_koreamap_svg()
     if not svg_path:
+        return None
+    with open(svg_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _render_korea_map(selected_sido_code: str):
+    """koreamap.svg 기반 인터랙티브 지도. 기본 그레이, 호버 검정, 선택 붉은색. 클릭 시 쿼리로 연동."""
+    svg_content = _cached_koreamap_svg_content()
+    if not svg_content:
         st.caption("지도 파일을 찾을 수 없습니다: koreamap.svg (프로젝트 루트에 koreamap.svg가 있는지 확인해주세요.)")
         return
-    svg_content = open(svg_path, "r", encoding="utf-8").read()
     svg_content = svg_content.replace('width="800" height="759" viewBox="0 0 800 759"', 'viewBox="0 0 800 759" preserveAspectRatio="xMidYMid meet"')
     svg_content = svg_content.replace("<path ", '<path class="map-region" ')
     name_to_code = {s["sido_name"]: s["sido_code"] for s in SIDO_MASTER}
@@ -123,8 +126,8 @@ def page_virtual_population_db():
             st.session_state["selected_sido_label"] = selected_region_label
             st.session_state["vdb_sido_select"] = selected_region_label  # 드롭다운 value와 동기화
 
-        # 시도별 통계 (가상인구 DB 수; 캐싱으로 재실행 시 재로드 방지)
-        vdb_stats = _cached_sido_vdb_stats()
+        # 시도별 통계 (가상인구 DB 수; core.db get_sido_vdb_stats 캐싱 활용)
+        vdb_stats = get_sido_vdb_stats()
         region_stats = {}
         for s in SIDO_MASTER:
             if s["sido_code"] == "00":
@@ -185,7 +188,6 @@ def page_virtual_population_db():
                 (selected_sido_code,)
             )
             db_rows = cur.fetchall()
-            conn.close()
 
             if not db_rows:
                 st.info("가상인구 DB에 데이터가 없습니다. 아래 2차 대입결과에서 선택하여 추가해주세요.")
@@ -268,7 +270,6 @@ def page_virtual_population_db():
                         cur = conn.cursor()
                         cur.execute("DELETE FROM virtual_population_db WHERE sido_code = ?", (selected_sido_code,))
                         conn.commit()
-                        conn.close()
                         st.session_state.vdb_selected_records = []
                         st.success(f"{selected_sido_name} 지역의 가상인구 DB가 초기화되었습니다.")
                         st.rerun()
@@ -282,100 +283,130 @@ def page_virtual_population_db():
                         if st.button("페르소나", type="primary", use_container_width=True, key="vdb_persona"):
                             st.session_state.persona_generation_running = True
                             st.session_state.persona_generation_stop = False
+                            st.session_state.persona_work_queue = None  # 다음 run에서 구축
                             st.rerun()
                     else:
                         if st.button("중지", type="secondary", use_container_width=True, key="vdb_persona_stop"):
                             st.session_state.persona_generation_stop = True
                             st.rerun()
-                    # 페르소나 생성 로직 실행 (표 아래에서 실행)
+                    # 중지 클릭 후: 즉시 멈추고 지금까지 반영된 건수 안내
+                    if st.session_state.persona_generation_running and st.session_state.persona_generation_stop:
+                        processed = st.session_state.get("persona_next_index", 0)
+                        st.session_state.persona_generation_running = False
+                        st.session_state.persona_generation_stop = False
+                        st.session_state.pop("persona_work_queue", None)
+                        st.session_state.pop("persona_next_index", None)
+                        st.session_state.pop("persona_total", None)
+                        st.session_state.pop("persona_sido_code", None)
+                        st.warning(f"페르소나 생성을 중지했습니다. 지금까지 생성된 {processed}명의 페르소나가 가상인구 DB에 반영되어 있습니다.")
+                        st.rerun()
+                    # 페르소나 생성 로직: 배치마다 DB 저장 후 rerun 해서 중지 버튼이 즉시 반영되도록 함
                     if st.session_state.persona_generation_running and not st.session_state.persona_generation_stop:
                         conn = db_conn()
                         cur = conn.cursor()
-                        cur.execute(
-                            "SELECT id, data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-                            (selected_sido_code,)
-                        )
-                        pgr_rows = cur.fetchall()
-                        if not pgr_rows:
-                            st.warning("가상인구 DB에 데이터가 없습니다. 먼저 데이터를 추가해주세요.")
-                            st.session_state.persona_generation_running = False
-                        else:
-                            rows_to_update = []
-                            for row in pgr_rows:
-                                try:
-                                    record_id, data_json = row[0], row[1]
-                                    df = pd.read_json(data_json, orient="records")
-                                    if "식별NO" in df.columns:
-                                        df = df.drop(columns=["식별NO"])
-                                    if "페르소나" not in df.columns:
-                                        df["페르소나"] = ""
-                                    if "현시대 반영" not in df.columns:
-                                        df["현시대 반영"] = ""
-                                    empty_mask = (df["페르소나"].isna()) | (df["페르소나"].astype(str).str.strip() == "")
-                                    if empty_mask.sum() > 0:
-                                        rows_to_update.append({"id": record_id, "df": df, "empty_mask": empty_mask})
-                                except Exception:
-                                    continue
-                            if not rows_to_update:
-                                st.info("모든 가상인물의 페르소나가 이미 생성되어 있습니다.")
+                        work_queue = st.session_state.get("persona_work_queue")
+                        next_index = st.session_state.get("persona_next_index", 0)
+                        total_work = st.session_state.get("persona_total", 0)
+                        if work_queue is None:
+                            cur.execute(
+                                "SELECT id, data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
+                                (selected_sido_code,)
+                            )
+                            pgr_rows = cur.fetchall()
+                            if not pgr_rows:
+                                st.warning("가상인구 DB에 데이터가 없습니다. 먼저 데이터를 추가해주세요.")
                                 st.session_state.persona_generation_running = False
                             else:
-                                try:
-                                    from utils.gemini_key import GEMINI_API_KEY
-                                    api_ok = GEMINI_API_KEY and "여기에_" not in (GEMINI_API_KEY or "")
-                                    if not api_ok:
-                                        api_ok = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
-                                    if not api_ok and hasattr(st, 'secrets') and st.secrets.get("GEMINI_API_KEY"):
-                                        api_ok = True
-                                    if not api_ok:
-                                        st.error("⚠️ API 키가 설정되지 않았습니다. .env 또는 Streamlit Secrets에 GEMINI_API_KEY를 설정해주세요.")
-                                        st.session_state.persona_generation_running = False
-                                        st.rerun()
-                                    gemini_client = GeminiClient()
-                                    progress_bar = st.progress(0)
-                                    status_placeholder = st.empty()
-                                    all_empty_rows = []
-                                    for item in rows_to_update:
-                                        for idx in item["df"][item["empty_mask"]].index.tolist():
-                                            all_empty_rows.append({"record_id": item["id"], "df": item["df"], "row_idx": idx, "row_data": item["df"].loc[idx]})
-                                    total_rows = len(all_empty_rows)
-                                    processed = 0
-                                    batch_size = 50
-                                    for batch_start in range(0, total_rows, batch_size):
-                                        if st.session_state.persona_generation_stop:
-                                            break
-                                        batch_end = min(batch_start + batch_size, total_rows)
-                                        record_updates = {}
-                                        for i in range(batch_start, batch_end):
-                                            item = all_empty_rows[i]
-                                            row = item["row_data"]
-                                            persona_info = {c: row[c] for c in ["거주지역", "성별", "연령", "경제활동", "교육정도", "월평균소득"] if c in row and pd.notna(row.get(c))}
-                                            prompt = f"다음 가상인물의 특성 정보를 바탕으로 이 인물의 페르소나를 200자 이내 서술형으로 작성해주세요.\n특성 정보:\n" + "\n".join([f"- {k}: {v}" for k, v in persona_info.items()]) + "\n\n페르소나 (200자 이내):"
-                                            try:
-                                                resp = gemini_client._client.models.generate_content(model=gemini_client._model, contents=prompt)
-                                                persona_text = (resp.text or "").strip()[:200]
-                                            except Exception:
-                                                persona_text = ""
-                                            item["df"].at[item["row_idx"], "페르소나"] = persona_text
-                                            record_updates[item["record_id"]] = item["df"]
-                                            processed += 1
-                                            status_placeholder.caption(f"처리 중: {processed}/{total_rows}명")
-                                            progress_bar.progress(processed / total_rows)
-                                        for rid, update_df in record_updates.items():
-                                            cur.execute("UPDATE virtual_population_db SET data_json = ? WHERE id = ?", (update_df.to_json(orient="records", force_ascii=False), rid))
-                                        conn.commit()
-                                    conn.close()
-                                    progress_bar.empty()
-                                    status_placeholder.empty()
+                                work_queue = []
+                                for row in pgr_rows:
+                                    try:
+                                        record_id, data_json = row[0], row[1]
+                                        df = pd.read_json(data_json, orient="records")
+                                        if "페르소나" not in df.columns:
+                                            df["페르소나"] = ""
+                                        empty_mask = (df["페르소나"].isna()) | (df["페르소나"].astype(str).str.strip() == "")
+                                        for idx in df.index[empty_mask].tolist():
+                                            row_data = df.loc[idx]
+                                            persona_info = {k: row_data.get(k) for k in ["거주지역", "성별", "연령", "경제활동", "교육정도", "월평균소득"] if k in row_data and pd.notna(row_data.get(k))}
+                                            work_queue.append({"record_id": record_id, "row_idx": int(idx), "persona_info": persona_info})
+                                    except Exception:
+                                        continue
+                                if not work_queue:
+                                    st.info("모든 가상인물의 페르소나가 이미 생성되어 있습니다.")
                                     st.session_state.persona_generation_running = False
-                                    st.session_state.persona_generation_stop = False
-                                    st.success(f"페르소나 생성 완료: {processed}명")
+                                else:
+                                    st.session_state.persona_work_queue = work_queue
+                                    st.session_state.persona_next_index = 0
+                                    st.session_state.persona_total = len(work_queue)
+                                    st.session_state.persona_sido_code = selected_sido_code
                                     st.rerun()
-                                except Exception as e:
-                                    conn.close()
-                                    st.error(f"페르소나 생성 중 오류: {e}")
+                        else:
+                            try:
+                                from utils.gemini_key import GEMINI_API_KEY
+                                api_ok = GEMINI_API_KEY and "여기에_" not in (GEMINI_API_KEY or "")
+                                if not api_ok:
+                                    api_ok = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+                                if not api_ok and hasattr(st, 'secrets') and st.secrets.get("GEMINI_API_KEY"):
+                                    api_ok = True
+                                if not api_ok:
+                                    st.error("⚠️ API 키가 설정되지 않았습니다. .env 또는 Streamlit Secrets에 GEMINI_API_KEY를 설정해주세요.")
                                     st.session_state.persona_generation_running = False
-                                    st.session_state.persona_generation_stop = False
+                                    st.session_state.persona_work_queue = None
+                                    st.rerun()
+                                else:
+                                    gemini_client = GeminiClient()
+                                    batch_size = 5
+                                    batch_end = min(next_index + batch_size, total_work)
+                                    progress_bar = st.progress(next_index / total_work if total_work else 0)
+                                    status_placeholder = st.empty()
+                                    record_dfs = {}
+                                    for i in range(next_index, batch_end):
+                                        item = work_queue[i]
+                                        persona_info = item["persona_info"]
+                                        prompt = f"다음 가상인물의 특성 정보를 바탕으로 이 인물의 페르소나를 200자 이내 서술형으로 작성해주세요.\n특성 정보:\n" + "\n".join([f"- {k}: {v}" for k, v in persona_info.items()]) + "\n\n페르소나 (200자 이내):"
+                                        try:
+                                            resp = gemini_client._client.models.generate_content(model=gemini_client._model, contents=prompt)
+                                            persona_text = (resp.text or "").strip()[:200]
+                                        except Exception:
+                                            persona_text = ""
+                                        rid, row_idx = item["record_id"], item["row_idx"]
+                                        if rid not in record_dfs:
+                                            cur.execute("SELECT data_json FROM virtual_population_db WHERE id = ?", (rid,))
+                                            row = cur.fetchone()
+                                            if row:
+                                                df = pd.read_json(row[0], orient="records")
+                                                if "페르소나" not in df.columns:
+                                                    df["페르소나"] = ""
+                                                record_dfs[rid] = df
+                                        if rid in record_dfs:
+                                            record_dfs[rid].at[row_idx, "페르소나"] = persona_text
+                                        status_placeholder.caption(f"처리 중: {batch_end}/{total_work}명")
+                                        progress_bar.progress(batch_end / total_work)
+                                    for rid, update_df in record_dfs.items():
+                                        cur.execute("UPDATE virtual_population_db SET data_json = ? WHERE id = ?", (update_df.to_json(orient="records", force_ascii=False), rid))
+                                    conn.commit()
+                                    st.session_state.persona_next_index = batch_end
+                                    if batch_end >= total_work:
+                                        progress_bar.empty()
+                                        status_placeholder.empty()
+                                        st.session_state.persona_generation_running = False
+                                        st.session_state.persona_generation_stop = False
+                                        st.session_state.pop("persona_work_queue", None)
+                                        st.session_state.pop("persona_next_index", None)
+                                        st.session_state.pop("persona_total", None)
+                                        st.session_state.pop("persona_sido_code", None)
+                                        st.success(f"페르소나 생성 완료: {total_work}명")
+                                        st.rerun()
+                                    else:
+                                        st.rerun()
+                            except Exception as e:
+                                st.error(f"페르소나 생성 중 오류: {e}")
+                                st.session_state.persona_generation_running = False
+                                st.session_state.persona_generation_stop = False
+                                st.session_state.pop("persona_work_queue", None)
+                                st.session_state.pop("persona_next_index", None)
+                                st.session_state.pop("persona_total", None)
+                                st.session_state.pop("persona_sido_code", None)
 
             # 2차 대입결과 목록 (가상인구 DB 열 제일 아래, 데이터 유무와 관계없이 표시)
             with st.expander("2차 대입결과 목록 (클릭하여 목록 확인)"):
@@ -488,7 +519,6 @@ def page_virtual_population_db():
                                 except Exception as e:
                                     st.warning(f"기록 추가 실패: {excel_path} - {e}")
                             conn.commit()
-                            conn.close()
                             if added_count > 0:
                                 st.success(f"{added_count}개의 기록이 가상인구 DB에 추가되었습니다.")
                                 st.session_state.vdb_selected_records = []
@@ -539,7 +569,7 @@ def page_virtual_population_db():
             # 전체 학습 모드: 텍스트 + PDF 업로드 및 현시대 반영 대입
             if st.session_state.chat_mode == "전체 학습":
                 st.markdown("**전체 학습: 현시대 자료 입력**")
-                st.caption("텍스트를 입력하거나 PDF를 업로드하면, Gemini가 분석하여 각 가상인구의 페르소나·특성에 맞게 관심분야 가중치를 적용해 '현시대 반영'을 100자 이내로 생성·대입합니다.")
+                st.caption("텍스트를 입력하거나 PDF를 업로드하면, Gemini가 분석하여 각 가상인구의 페르소나·특성에 맞게 관심분야 가중치를 적용해 '현시대 반영'을 100자 내외로 생성·대입합니다. 반영 필드는 최대 200자까지 저장되며, 생성은 100자 내외로 해 짤림 없이 저장됩니다.")
             
                 col_learn1, col_learn2 = st.columns([1, 1])
                 with col_learn1:
@@ -640,7 +670,6 @@ def page_virtual_population_db():
                                     st.session_state.learn_stop = False
                                     for k in ("learn_combined_content", "learn_sido_code", "learn_total_done"):
                                         st.session_state.pop(k, None)
-                                    conn.close()
                                     st.rerun()
                                 else:
                                     chunk = all_people_to_process[:LEARN_CHUNK_SIZE]
@@ -670,22 +699,21 @@ def page_virtual_population_db():
     {combined_content[:8000]}
     ---
     아래 가상인물의 페르소나와 특성을 고려하여, 이 인물의 관심분야에 맞는 내용만 선택적으로 반영하세요.
-    관련도가 높으면 100자 이내로 한 문장으로 '현시대 반영' 문장을 작성하고, 관련도가 낮으면 빈 문자열만 반환하세요.
-    반드시 100자 이내, 한 문장으로만 출력하고 다른 설명은 하지 마세요.
+    관련도가 높으면 100자 내외로 한 문장으로 '현시대 반영' 문장을 작성하고, 관련도가 낮으면 빈 문자열만 반환하세요.
+    반드시 100자 내외, 한 문장으로만 출력하고 다른 설명은 하지 마세요. (짤리지 않도록 100자 이하로 작성)
 
     가상인물 정보:
     {profile_str}
 
-    현시대 반영 (100자 이내, 또는 관련 없으면 빈칸):"""
+    현시대 반영 (100자 내외 한 문장, 또는 관련 없으면 빈칸):"""
                                         try:
                                             resp = gemini_client._client.models.generate_content(model=gemini_client._model, contents=prompt)
                                             text = (resp.text or "").strip()
                                             if "현시대 반영" in text and ":" in text:
                                                 text = text.split(":", 1)[-1].strip()
-                                            if len(text) > 100:
-                                                text = text[:97].rsplit(" ", 1)[0] if " " in text[:97] else text[:97]
-                                                if len(text) > 100:
-                                                    text = text[:97] + "..."
+                                            # 저장은 최대 200자까지 허용 (생성은 100자 내외이므로 짤림 없음)
+                                            if len(text) > 200:
+                                                text = text[:200]
                                             df.at[row_idx, "현시대 반영"] = text
                                         except Exception:
                                             pass
@@ -695,7 +723,6 @@ def page_virtual_population_db():
                                         processed_this_run += 1
                                         progress_bar.progress(processed_this_run / len(chunk))
                                 
-                                    conn.close()
                                     progress_bar.empty()
                                     status_placeholder.empty()
                                     st.session_state.learn_total_done = total_done + processed_this_run
@@ -728,7 +755,6 @@ def page_virtual_population_db():
                     (selected_sido_code,)
                 )
                 db_rows = cur.fetchall()
-                conn.close()
             
                 if db_rows:
                     # 모든 데이터를 하나의 DataFrame으로 합치기
@@ -1039,7 +1065,7 @@ def page_virtual_population_db():
                     _now = datetime.datetime.now()
                     _m = _now.month
                     _season = "봄" if 3 <= _m <= 5 else "여름" if 6 <= _m <= 8 else "가을" if 9 <= _m <= 11 else "겨울"
-                    _time_ctx = f"현재 시점: {_now.strftime('%Y년 %m월 %d일')}, {_season}입니다. 답변 시 이 시기·계절·날씨에 맞는 말을 해주세요. (예: 겨울에는 추위·난방·따뜻한 것, 여름에는 더위·에어컨·시원한 것 등 계절에 맞게)"
+                    _time_ctx = f"현재 시점: {_now.strftime('%Y년 %m월 %d일')}, {_season}입니다. 답변 시 계절·시기에 어긋나는 말만 하지 마세요. (예: 여름에 '겨울 옷 입으세요', 겨울에 '시원한 음식만 드세요'처럼 맞지 않는 얘기는 피하세요.) 계절 이야기만 할 필요는 없고, 질문에 맞게 자연스럽게 답하세요."
                     # GeminiClient 재사용 (세션 상태에 저장)
                     if "chat_gemini_client" not in st.session_state:
                         st.session_state.chat_gemini_client = GeminiClient()
@@ -1066,7 +1092,7 @@ def page_virtual_population_db():
                                     prompt = f"""다음 가상인물의 페르소나: {persona_info}{prompt_extra}
     
         {_time_ctx}
-        이 가상인물의 이름은 반드시 '{virtual_name}'입니다. 답변 시 자신을 부르거나 이름을 말할 때 반드시 '{virtual_name}'만 사용하세요.
+        이 가상인물의 이름은 '{virtual_name}'이지만, 사용자가 이름을 물어보지 않으면 답변 안에서 자기 이름을 말하지 마세요. "계석 OOO는", "저는 OOO인데"처럼 기계적으로 소개하지 말고, 사람처럼 자연스럽게 대화체로만 답하세요. 이름을 쓸 때만 '{virtual_name}'을 사용하세요.
         이 가상인물의 입장에서 사용자의 질문에 자연스럽고 현실적인 대화체로 답변해주세요. 현시대 반영이 주어졌다면 그 관심·반응도 답변에 반영해주세요.
         답변은 반드시 100자 이내로만 작성하세요. 100자를 초과하지 마세요.
     
@@ -1143,7 +1169,7 @@ def page_virtual_population_db():
         {chr(10).join(personas)}
     
         {_time_ctx}
-        각 가상인물은 위에 적힌 자신의 이름만 사용해서 자신을 부르세요. 다른 이름을 만들지 마세요.
+        각 가상인물은 사용자가 이름을 묻지 않으면 답변 안에서 "계석 OOO는", "저 OOO는"처럼 자기 이름을 붙이지 말고, 사람처럼 자연스럽게 의견만 말하세요. 이름을 쓸 때만 위에 적힌 자신의 이름을 사용하세요.
         이 가상인물들이 각자의 관점에서 사용자의 질문에 답변해주세요. 각 인물의 특성과 현시대 반영(주어졌다면)에 맞는 다양한 의견을 제시해주세요.
         답변은 반드시 각 인물당 100자 이내로만 작성하세요. 100자를 초과하지 마세요.
     
@@ -1208,7 +1234,6 @@ def page_virtual_population_db():
                                     (selected_sido_code,)
                                 )
                                 db_rows = cur.fetchall()
-                                conn.close()
                                 if not db_rows:
                                     response_text = "가상인구 DB에 데이터가 없습니다. 먼저 데이터를 추가해주세요."
                                 else:
@@ -1286,7 +1311,6 @@ def page_virtual_population_db():
                                 (selected_sido_code,)
                             )
                             db_rows = cur.fetchall()
-                            conn.close()
                             if db_rows:
                                 all_dfs = []
                                 for row in db_rows:

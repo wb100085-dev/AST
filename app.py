@@ -6,11 +6,17 @@ from __future__ import annotations
 import os
 import traceback
 import pickle
+import json
 from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from io import BytesIO
 from datetime import datetime
 
 import streamlit as st
+import pandas as pd
+import numpy as np
+
+# 캐시 유효시간: 24시간 (초)
+CACHE_TTL_SECONDS = 24 * 3600  # 86400
 
 # 타입 검사용 (실제 로딩은 main()에서 지연 로딩)
 if TYPE_CHECKING:
@@ -59,6 +65,45 @@ from core.session_cache import (
 )
 
 
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def get_cached_kosis_json(url: str) -> list:
+    """KOSIS API JSON 결과를 24시간 캐시. fetch_json 대체용."""
+    import requests
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list):
+        data = data.get("data", []) if isinstance(data, dict) else []
+    return data
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def cached_generate_base_population(
+    n: int,
+    selected_sigungu_json: str,
+    weights_6axis_json: str,
+    sigungu_pool_json: str,
+    seed: int,
+    margins_axis_json: str,
+    apply_ipf_flag: bool,
+):
+    """generate_base_population 결과를 24시간 캐시. 동일 인자면 재계산 생략."""
+    from utils.ipf_generator import generate_base_population
+    selected_sigungu = json.loads(selected_sigungu_json) if selected_sigungu_json else []
+    weights_6axis = json.loads(weights_6axis_json) if weights_6axis_json else {}
+    sigungu_pool = json.loads(sigungu_pool_json) if sigungu_pool_json else []
+    margins_axis = json.loads(margins_axis_json) if margins_axis_json else {}
+    return generate_base_population(
+        n=n,
+        selected_sigungu=selected_sigungu,
+        weights_6axis=weights_6axis,
+        sigungu_pool=sigungu_pool,
+        seed=seed,
+        margins_axis=margins_axis,
+        apply_ipf_flag=apply_ipf_flag,
+    )
+
+
 def _apply_step2_column_rename(df: pd.DataFrame) -> pd.DataFrame:
     """2단계 결과 컬럼명을 출력용으로 변경 (존재하는 컬럼만)."""
     rename = {k: v for k, v in STEP2_COLUMN_RENAME.items() if k in df.columns}
@@ -74,9 +119,9 @@ def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
             if col in df.columns:
                 df.loc[no_income, col] = ""
     
-    # 2. 자녀 없음 → 공교육비·사교육비 비움
-    if "자녀유무" in df.columns:
-        no_child = df["자녀유무"].astype(str).str.strip().isin(["무", "없음", "없다"])
+    # 2. 자녀 없음 → 공교육비·사교육비 비움 (가상인구 DB 컬럼명 기준)
+    if "학생 및 미취학 자녀 유무" in df.columns:
+        no_child = df["학생 및 미취학 자녀 유무"].astype(str).str.strip().isin(["무", "없음", "없다"])
         for col in ["공교육비", "사교육비"]:
             if col in df.columns:
                 df.loc[no_child, col] = ""
@@ -188,10 +233,10 @@ def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
             pass
     
     # 8. 경제활동-소득 불일치: 비경제활동자(자녀 없음)는 고소득 불가
-    if "경제활동" in df.columns and "월평균소득" in df.columns and "자녀유무" in df.columns:
+    if "경제활동" in df.columns and "월평균소득" in df.columns and "학생 및 미취학 자녀 유무" in df.columns:
         try:
             inactive = df["경제활동"].astype(str).str.strip() == "비경제활동"
-            no_child = df["자녀유무"].astype(str).str.strip().isin(["무", "없음", "없다"])
+            no_child = df["학생 및 미취학 자녀 유무"].astype(str).str.strip().isin(["무", "없음", "없다"])
             high_income = df["월평균소득"].astype(str).str.contains("200|300|400|500|600|700|800", na=False, regex=True)
             invalid_income = inactive & no_child & high_income
             if invalid_income.sum() > 0:
@@ -234,10 +279,10 @@ def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
                 spouse_col = spouse_cols[0]
                 has_spouse = df[spouse_col].astype(str).str.strip().isin(["경제활동", "비경제활동", "유", "있음", "있다", "있습니다"])
             
-            # 자녀 보유 여부 확인
+            # 자녀 보유 여부 확인 (가상인구 DB 컬럼명 기준)
             has_child = pd.Series([False] * len(df), index=df.index)
-            if "자녀유무" in df.columns:
-                has_child = df["자녀유무"].astype(str).str.strip().isin(["유", "있음", "있다", "있습니다"])
+            if "학생 및 미취학 자녀 유무" in df.columns:
+                has_child = df["학생 및 미취학 자녀 유무"].astype(str).str.strip().isin(["유", "있음", "있다", "있습니다"])
             
             invalid_family = very_young & has_spouse & has_child
             if invalid_family.sum() > 0:
@@ -251,8 +296,8 @@ def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
                 
                 # 나머지는 자녀 제거
                 remove_child = invalid_family & ~remove_spouse
-                if "자녀유무" in df.columns and remove_child.sum() > 0:
-                    df.loc[remove_child, "자녀유무"] = "무"
+                if "학생 및 미취학 자녀 유무" in df.columns and remove_child.sum() > 0:
+                    df.loc[remove_child, "학생 및 미취학 자녀 유무"] = "무"
         except Exception:
             pass
     
@@ -279,21 +324,21 @@ def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
                 df.loc[inactive, col] = ""
     
     # 13. 복지 수혜 적격성: 연령-소득-자녀-복지만족도 연계
-    if "연령" in df.columns and "월평균소득" in df.columns and "자녀유무" in df.columns:
+    if "연령" in df.columns and "월평균소득" in df.columns and "학생 및 미취학 자녀 유무" in df.columns:
         try:
             age_numeric = pd.to_numeric(df["연령"], errors='coerce')
             # 13-1. 자녀 없으면 임신·출산·육아 복지 만족도 비움
-            if "임신·출산·육아에 대한 복지" in df.columns:
-                no_child = df["자녀유무"].astype(str).str.strip().isin(["무", "없음", "없다"])
-                df.loc[no_child, "임신·출산·육아에 대한 복지"] = ""
+            if "임신·출산·육아에 대한 복지 만족도" in df.columns:
+                no_child = df["학생 및 미취학 자녀 유무"].astype(str).str.strip().isin(["무", "없음", "없다"])
+                df.loc[no_child, "임신·출산·육아에 대한 복지 만족도"] = ""
             
             # 13-2. 고소득자(300만원 이상)는 저소득층 복지 만족도 비움 (일반적으로)
-            if "저소득층 등 취약계층에 대한 복지" in df.columns:
+            if "저소득층 등 취약계층에 대한 복지 만족도" in df.columns:
                 high_income = df["월평균소득"].astype(str).str.contains("300|400|500|600|700|800", na=False, regex=True)
                 # 단, 고령자(65세 이상)는 예외로 둠
                 not_elderly = age_numeric < 65
                 invalid_welfare = high_income & not_elderly
-                df.loc[invalid_welfare, "저소득층 등 취약계층에 대한 복지"] = ""
+                df.loc[invalid_welfare, "저소득층 등 취약계층에 대한 복지 만족도"] = ""
         except Exception:
             pass
     
@@ -324,10 +369,6 @@ def group_by_category(stats: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, A
 def ensure_session_state():
     if "app_started" not in st.session_state:
         st.session_state.app_started = False
-    if "nav_selected" not in st.session_state:
-        st.session_state.nav_selected = "가상인구 DB"
-    if "_prev_nav_selected" not in st.session_state:
-        st.session_state._prev_nav_selected = None
     if "generated_df" not in st.session_state:
         st.session_state.generated_df = None
     if "report" not in st.session_state:
@@ -363,7 +404,7 @@ def load_sigungu_options(sido_code: str, kosis_client: KosisClient) -> List[str]
             f"method=getList&apiKey=YOUR_KEY&format=json&jsonVD=Y&"
             f"userStatsId=...&objL1={sido_code}"
         )
-        data = kosis_client.fetch_json(url)
+        data = get_cached_kosis_json(url)
         sigungu_list = kosis_client.extract_sigungu_list_from_population_table(
             data, sido_prefix=SIDO_CODE_TO_NAME.get(sido_code, "")
         )
@@ -473,291 +514,223 @@ def page_data_management():
                 st.success(f"{axis_label} 마진 통계 업데이트: {stat_options[selected_id]}")
                 st.rerun()
 
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def convert_kosis_to_distribution_cached(kosis_data_json: str, axis_key: str) -> Tuple[list, list]:
+    """KOSIS 데이터 변환 결과를 24시간 캐시. 동일 (데이터, 축)이면 재계산 생략."""
+    kosis_data = json.loads(kosis_data_json) if kosis_data_json else []
+    return _convert_kosis_to_distribution_impl(kosis_data, axis_key)
+
+
+def _convert_kosis_to_distribution_impl(kosis_data, axis_key: str) -> Tuple[list, list]:
+    """KOSIS 데이터를 확률 분포로 변환 (labels, probabilities). 순수 계산만 수행."""
+    if not kosis_data:
+        return [], []
+    if isinstance(kosis_data, dict):
+        kosis_data = kosis_data.get("data", []) if "data" in kosis_data else [kosis_data]
+    if not isinstance(kosis_data, list):
+        return [], []
+    labels = []
+    values = []
+    if axis_key == "sigungu":
+        seen = set()
+        for row in kosis_data:
+            if isinstance(row, dict):
+                label = row.get("C1_NM", "").strip()
+                val = row.get("DT", "0")
+                if label and label not in ["소계", "합계", "Total", "경상북도"] and label not in seen:
+                    try:
+                        values.append(float(val))
+                        labels.append(label)
+                        seen.add(label)
+                    except Exception:
+                        pass
+    elif axis_key == "gender":
+        gender_map = {"남자": 0, "여자": 0}
+        for row in kosis_data:
+            if isinstance(row, dict):
+                label = row.get("C2_NM", "").strip()
+                val = row.get("DT", "0")
+                try:
+                    val_float = float(val)
+                    if "남자" in label or label == "남":
+                        gender_map["남자"] += val_float
+                    elif "여자" in label or label == "여":
+                        gender_map["여자"] += val_float
+                except (ValueError, TypeError):
+                    pass
+        for gender in ["남자", "여자"]:
+            if gender_map[gender] > 0:
+                labels.append(gender)
+                values.append(gender_map[gender])
+    elif axis_key == "age":
+        import re
+        age_map = {}
+        for row in kosis_data:
+            if not isinstance(row, dict):
+                continue
+            age_str = (row.get("C3_NM") or "").strip()
+            try:
+                val = float(str(row.get("DT", "0")).replace(",", "").strip() or 0)
+            except (ValueError, TypeError):
+                val = 0
+            if not age_str or age_str == "계":
+                continue
+            range_match = re.search(r"(\d+)\s*[-~]\s*(\d+)", age_str)
+            if range_match:
+                low = int(range_match.group(1))
+                high = int(range_match.group(2))
+                if low > high:
+                    low, high = high, low
+                low = max(20, low)
+                high = min(120, high)
+                if low <= high:
+                    count = high - low + 1
+                    per_age = val / count
+                    for a in range(low, high + 1):
+                        age_map[a] = age_map.get(a, 0) + per_age
+            else:
+                single_match = re.search(r"(\d+)", age_str)
+                if single_match:
+                    age_num = int(single_match.group(1))
+                    if 20 <= age_num <= 120:
+                        age_map[age_num] = age_map.get(age_num, 0) + val
+        for age_num in sorted(age_map.keys()):
+            labels.append(age_num)
+            values.append(age_map[age_num])
+    elif axis_key == "econ":
+        econ_map = {}
+        for row in kosis_data:
+            if isinstance(row, dict):
+                label = row.get("C2_NM", "").strip()
+                val = row.get("DT", "0").strip()
+                if val in ("-", "", None):
+                    continue
+                try:
+                    val_float = float(val)
+                except (ValueError, TypeError):
+                    continue
+                if "하였다" in label or "일하였음" in label or "취업" in label or "경제활동" in label or "일했음" in label:
+                    econ_map["경제활동"] = econ_map.get("경제활동", 0) + val_float
+                elif "하지 않았다" in label or "일하지 않았음" in label or "구직" in label or "실업" in label or "비경제" in label:
+                    econ_map["비경제활동"] = econ_map.get("비경제활동", 0) + val_float
+                else:
+                    econ_map["비경제활동"] = econ_map.get("비경제활동", 0) + val_float
+        for econ_type, total_val in econ_map.items():
+            labels.append(econ_type)
+            values.append(total_val)
+    elif axis_key == "edu":
+        edu_map = {"중졸이하": 0, "고졸": 0, "대졸이상": 0}
+        for row in kosis_data:
+            if isinstance(row, dict):
+                label = ""
+                for field in ["C2_NM", "C3_NM", "C4_NM", "C5_NM"]:
+                    val_field = str(row.get(field, "")).strip()
+                    if val_field and val_field not in ("계", "전체", "소계"):
+                        if any(k in val_field for k in ["초졸", "중졸", "고졸", "대졸", "대학", "무학", "초등", "전문대", "석사", "박사"]):
+                            label = val_field
+                            break
+                if not label:
+                    for field in ["C3_NM", "C4_NM", "C5_NM"]:
+                        val_field = str(row.get(field, "")).strip()
+                        if val_field and val_field not in ("계", "전체", "소계"):
+                            label = val_field
+                            break
+                if not label:
+                    continue
+                dt_val = str(row.get("DT", "0")).strip()
+                if dt_val in ("-", "", None):
+                    continue
+                try:
+                    val_float = float(dt_val)
+                except (ValueError, TypeError):
+                    continue
+                if "초졸" in label or "무학" in label or "초등" in label or "중졸" in label:
+                    edu_map["중졸이하"] += val_float
+                elif "고졸" in label or "고등" in label:
+                    edu_map["고졸"] += val_float
+                elif "대학" in label or "대졸" in label or "전문대" in label or "석사" in label or "박사" in label:
+                    edu_map["대졸이상"] += val_float
+                elif val_float > 0:
+                    edu_map["중졸이하"] += val_float
+        if sum(edu_map.values()) == 0:
+            edu_map = {"중졸이하": 25.0, "고졸": 40.0, "대졸이상": 35.0}
+        for edu_level, total_val in edu_map.items():
+            if total_val > 0:
+                labels.append(edu_level)
+                values.append(total_val)
+    elif axis_key == "income":
+        income_map = {
+            "50만원미만": 0, "50-100만원": 0, "100-200만원": 0, "200-300만원": 0,
+            "300-400만원": 0, "400-500만원": 0, "500-600만원": 0, "600-700만원": 0,
+            "700-800만원": 0, "800만원이상": 0,
+        }
+        for row in kosis_data:
+            if isinstance(row, dict):
+                label = row.get("C2_NM", "").strip()
+                val = row.get("DT", "0")
+                try:
+                    val_float = float(val)
+                    if "50만원미만" in label or ("50" in label and "미만" in label and "100" not in label):
+                        income_map["50만원미만"] += val_float
+                    elif "50~100" in label or "50-100" in label or ("50만원" in label and "100만원" in label):
+                        income_map["50-100만원"] += val_float
+                    elif "100~200" in label or "100-200" in label:
+                        income_map["100-200만원"] += val_float
+                    elif "200~300" in label or "200-300" in label:
+                        income_map["200-300만원"] += val_float
+                    elif "300~400" in label or "300-400" in label:
+                        income_map["300-400만원"] += val_float
+                    elif "400~500" in label or "400-500" in label:
+                        income_map["400-500만원"] += val_float
+                    elif "500~600" in label or "500-600" in label:
+                        income_map["500-600만원"] += val_float
+                    elif "600~700" in label or "600-700" in label:
+                        income_map["600-700만원"] += val_float
+                    elif "700~800" in label or "700-800" in label:
+                        income_map["700-800만원"] += val_float
+                    elif "800만원" in label and ("이상" in label or "초과" in label):
+                        income_map["800만원이상"] += val_float
+                except Exception:
+                    pass
+        for income_range, total_val in income_map.items():
+            if total_val > 0:
+                labels.append(income_range)
+                values.append(total_val)
+    if labels and values:
+        total = sum(values)
+        probabilities = [v / total for v in values] if total > 0 else [1.0 / len(values)] * len(values)
+        return labels, probabilities
+    return [], []
+
+
 def convert_kosis_to_distribution(kosis_data, axis_key: str):
     """
     KOSIS 데이터를 확률 분포로 변환 (labels, probabilities)
-    
     axis_key: "sigungu", "gender", "age", "econ", "income", "edu"
+    로그 기록 후 _convert_kosis_to_distribution_impl 호출.
     """
     from datetime import datetime
-    
-    # 로그 기록 초기화
-    log_entry = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "stage": f"convert_kosis_to_distribution({axis_key})",
-        "input_data_type": str(type(kosis_data)),
-        "input_sample": str(kosis_data)[:500] if kosis_data else "None",
-        "axis_key": axis_key,
-        "status": "started"
-    }
-    
     try:
-        if not kosis_data:
-            log_entry["status"] = "error"
-            log_entry["error"] = "kosis_data is empty"
-            if "work_logs" not in st.session_state:
-                st.session_state.work_logs = []
-            st.session_state.work_logs.append(log_entry)
-            return [], []
-        
-        # 리스트 형태로 변환
-        if isinstance(kosis_data, dict):
-            if "data" in kosis_data:
-                kosis_data = kosis_data["data"]
-            else:
-                kosis_data = [kosis_data]
-        
-        if not isinstance(kosis_data, list):
-            log_entry["status"] = "error"
-            log_entry["error"] = f"Invalid data type: {type(kosis_data)}"
-            st.session_state.work_logs.append(log_entry)
-            return [], []
-        
-        labels = []
-        values = []
-        
-        # === 축별 처리 ===
-        if axis_key == "sigungu":
-            # ✅ C1_NM(지역명) 사용
-            seen = set()
-            for row in kosis_data:
-                if isinstance(row, dict):
-                    label = row.get("C1_NM", "").strip()
-                    val = row.get("DT", "0")
-                    
-                    if label and label not in ["소계", "합계", "Total", "경상북도"] and label not in seen:
-                        try:
-                            values.append(float(val))
-                            labels.append(label)
-                            seen.add(label)
-                        except:
-                            pass
-        
-        elif axis_key == "gender":
-            # ✅ C2_NM에서 성별 추출 (순서 보장: 남자, 여자)
-            gender_map = {"남자": 0, "여자": 0}
-            for row in kosis_data:
-                if isinstance(row, dict):
-                    label = row.get("C2_NM", "").strip()
-                    val = row.get("DT", "0")
-                    
-                    try:
-                        val_float = float(val)
-                        if "남자" in label or label == "남":
-                            gender_map["남자"] += val_float
-                        elif "여자" in label or label == "여":
-                            gender_map["여자"] += val_float
-                    except (ValueError, TypeError):
-                        pass
-            
-            # ✅ 순서 보장: 항상 남자, 여자 순서로
-            for gender in ["남자", "여자"]:
-                if gender_map[gender] > 0:
-                    labels.append(gender)
-                    values.append(gender_map[gender])
-        
-        elif axis_key == "age":
-            # ✅ C3_NM에서 연령 추출
-            import re
-            age_map = {}
-            
-            for row in kosis_data:
-                if isinstance(row, dict):
-                    age_str = row.get("C3_NM", "").strip()
-                    val = row.get("DT", "0")
-                    
-                    if age_str and age_str != "계":
-                        match = re.search(r'(\d+)', age_str)
-                        if match:
-                            try:
-                                age_num = int(match.group(1))
-                                # 20세 미만은 생성하지 않음
-                                if 20 <= age_num <= 120:
-                                    age_map[age_num] = age_map.get(age_num, 0) + float(val)
-                            except:
-                                pass
-            
-            for age_num in sorted(age_map.keys()):
-                labels.append(age_num)
-                values.append(age_map[age_num])
-        
-        elif axis_key == "econ":
-            # ✅ "하였다" → "경제활동"
-            econ_map = {}
-            for row in kosis_data:
-                if isinstance(row, dict):
-                    label = row.get("C2_NM", "").strip()
-                    val = row.get("DT", "0").strip()
-                    
-                    # '-' 값 처리
-                    if val == "-" or val == "" or val is None:
-                        continue
-                    
-                    try:
-                        val_float = float(val)
-                    except (ValueError, TypeError):
-                        continue
-                    
-                    if "하였다" in label or "일하였음" in label or "취업" in label or "경제활동" in label or "일했음" in label:
-                        econ_map["경제활동"] = econ_map.get("경제활동", 0) + val_float
-                    elif "하지 않았다" in label or "일하지 않았음" in label or "구직" in label or "실업" in label or "비경제" in label:
-                        econ_map["비경제활동"] = econ_map.get("비경제활동", 0) + val_float
-                    else:
-                        # 명시되지 않은 경우 비경제활동으로 분류
-                        econ_map["비경제활동"] = econ_map.get("비경제활동", 0) + val_float
-            
-            for econ_type, total_val in econ_map.items():
-                labels.append(econ_type)
-                values.append(total_val)
-        
-        elif axis_key == "edu":
-            # ✅ 교육정도 처리 (C2_NM, C3_NM, C4_NM, C5_NM 등 모든 필드에서 찾기)
-            edu_map = {"중졸이하": 0, "고졸": 0, "대졸이상": 0}
-            
-            for row in kosis_data:
-                if isinstance(row, dict):
-                    # 모든 가능한 필드에서 교육정도 찾기 (C2_NM부터 C5_NM까지)
-                    label = ""
-                    for field in ["C2_NM", "C3_NM", "C4_NM", "C5_NM"]:
-                        val_field = row.get(field, "").strip()
-                        if val_field and val_field != "계" and val_field != "전체" and val_field != "소계":
-                            # 교육정도 관련 키워드가 있는지 확인
-                            if any(keyword in val_field for keyword in ["초졸", "중졸", "고졸", "대졸", "대학", "무학", "초등", "전문대", "석사", "박사"]):
-                                label = val_field
-                                break
-                    
-                    # label을 찾지 못했지만 다른 필드에 값이 있으면 그것도 시도
-                    if not label:
-                        for field in ["C3_NM", "C4_NM", "C5_NM"]:
-                            val_field = row.get(field, "").strip()
-                            if val_field and val_field != "계" and val_field != "전체" and val_field != "소계":
-                                label = val_field
-                                break
-                    
-                    if not label:
-                        continue
-                    
-                    dt_val = row.get("DT", "0").strip()
-                    
-                    # '-' 처리
-                    if dt_val == "-" or dt_val == "" or dt_val is None:
-                        continue
-                    
-                    try:
-                        val_float = float(dt_val)
-                    except (ValueError, TypeError):
-                        continue
-                    
-                    # ✅ 매핑
-                    if "초졸" in label or "무학" in label or "초등" in label or "중졸" in label:
-                        edu_map["중졸이하"] += val_float
-                    elif "고졸" in label or "고등" in label:
-                        edu_map["고졸"] += val_float
-                    elif "대학" in label or "대졸" in label or "전문대" in label or "석사" in label or "박사" in label:
-                        edu_map["대졸이상"] += val_float
-                    else:
-                        # 명시되지 않은 경우에도 값이 있으면 중졸이하로 분류 (안전한 기본값)
-                        if val_float > 0:
-                            edu_map["중졸이하"] += val_float
-            
-            # 최소한 하나의 값이 있어야 함
-            if sum(edu_map.values()) == 0:
-                # 기본값 사용
-                edu_map = {"중졸이하": 25.0, "고졸": 40.0, "대졸이상": 35.0}
-            
-            for edu_level, total_val in edu_map.items():
-                if total_val > 0:
-                    labels.append(edu_level)
-                    values.append(total_val)
-        
-        elif axis_key == "income":
-            # ✅ 소득 구간 정확한 매핑 (50만원미만 추가)
-            income_map = {
-                "50만원미만": 0,
-                "50-100만원": 0,
-                "100-200만원": 0,
-                "200-300만원": 0,
-                "300-400만원": 0,
-                "400-500만원": 0,
-                "500-600만원": 0,
-                "600-700만원": 0,
-                "700-800만원": 0,
-                "800만원이상": 0,
-            }
-            
-            for row in kosis_data:
-                if isinstance(row, dict):
-                    label = row.get("C2_NM", "").strip()
-                    val = row.get("DT", "0")
-                    
-                    try:
-                        val_float = float(val)
-                        
-                        # ✅ 정확한 구간 매핑
-                        if "50만원미만" in label or ("50" in label and "미만" in label and "100" not in label):
-                            income_map["50만원미만"] += val_float
-                        elif ("50~100" in label or "50-100" in label) or ("50만원" in label and "100만원" in label):
-                            income_map["50-100만원"] += val_float
-                        elif "100~200" in label or "100-200" in label:
-                            income_map["100-200만원"] += val_float
-                        elif "200~300" in label or "200-300" in label:
-                            income_map["200-300만원"] += val_float
-                        elif "300~400" in label or "300-400" in label:
-                            income_map["300-400만원"] += val_float
-                        elif "400~500" in label or "400-500" in label:
-                            income_map["400-500만원"] += val_float
-                        elif "500~600" in label or "500-600" in label:
-                            income_map["500-600만원"] += val_float
-                        elif "600~700" in label or "600-700" in label:
-                            income_map["600-700만원"] += val_float
-                        elif "700~800" in label or "700-800" in label:
-                            income_map["700-800만원"] += val_float
-                        elif "800만원" in label and ("이상" in label or "초과" in label):
-                            income_map["800만원이상"] += val_float
-                    except:
-                        pass
-            
-            for income_range, total_val in income_map.items():
-                if total_val > 0:
-                    labels.append(income_range)
-                    values.append(total_val)
-        
-        # === 확률 정규화 ===
-        if len(labels) > 0 and len(values) > 0:
-            total = sum(values)
-            if total > 0:
-                probabilities = [v / total for v in values]
-            else:
-                probabilities = [1.0 / len(values)] * len(values)
-            
-            log_entry["status"] = "success"
-            log_entry["output_labels"] = str(labels)[:200]
-            log_entry["output_probs"] = str(probabilities)[:200]
-            log_entry["label_count"] = len(labels)
-            
-            if "work_logs" not in st.session_state:
-                st.session_state.work_logs = []
-            st.session_state.work_logs.append(log_entry)
-            
-            return labels, probabilities
-        
-        else:
-            log_entry["status"] = "error"
+        labels, probabilities = _convert_kosis_to_distribution_impl(kosis_data, axis_key)
+        log_entry = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "stage": f"convert_kosis_to_distribution({axis_key})",
+            "axis_key": axis_key,
+            "status": "success" if labels else "error",
+            "label_count": len(labels),
+        }
+        if not labels:
             log_entry["error"] = "No valid labels/values extracted"
-            st.session_state.work_logs.append(log_entry)
-            return [], []
-    
-    except Exception as e:
-        log_entry["status"] = "exception"
-        log_entry["error"] = str(e)
-        log_entry["traceback"] = traceback.format_exc()
-        
         if "work_logs" not in st.session_state:
             st.session_state.work_logs = []
         st.session_state.work_logs.append(log_entry)
-        
+        return labels, probabilities
+    except Exception as e:
+        log_entry = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "stage": f"convert_kosis_to_distribution({axis_key})", "axis_key": axis_key, "status": "exception", "error": str(e)}
+        if "work_logs" not in st.session_state:
+            st.session_state.work_logs = []
+        st.session_state.work_logs.append(log_entry)
         return [], []
-
 
 
 # -----------------------------
@@ -1036,6 +1009,19 @@ def draw_charts(df: pd.DataFrame, step2_columns: Optional[List[str]] = None, ste
                     st.plotly_chart(fig, use_container_width=True, key=f"chart_step2_{idx}")
 
 
+@st.fragment
+def _fragment_draw_charts(step2_only: bool = False):
+    """그래프 탭 전용 fragment — 이 블록 내 상호작용 시 전체가 아닌 이 부분만 갱신."""
+    df = st.session_state.get("step2_df") or st.session_state.get("generated_df") or st.session_state.get("step1_df")
+    if df is None or df.empty:
+        st.info("표시할 데이터가 없습니다.")
+        return
+    step2_cols = None
+    if step2_only:
+        step2_cols = [c for c in (st.session_state.get("step2_added_columns") or []) if c in df.columns]
+    draw_charts(df, step2_columns=step2_cols, step2_only=step2_only)
+
+
 def apply_step2_row_consistency(df: pd.DataFrame) -> pd.DataFrame:
     """
     2단계 통계 대입 후 행 방향 논리 일관성 정리.
@@ -1051,11 +1037,11 @@ def apply_step2_row_consistency(df: pd.DataFrame) -> pd.DataFrame:
         "종사상 지위",
         "직장명(산업 대분류)",
         "하는 일의 종류(직업 종분류)",
-        "하는일",
-        "임금/가구소득",
-        "근로시간",
-        "근무환경",
-        "전반적인 만족도",
+        "하는일 만족도",
+        "임금/가구소득 만족도",
+        "근로시간 만족도",
+        "근무환경 만족도",
+        "근무 여건 전반적인 만족도",
     ]
     for col in employment_related_columns:
         if col in out.columns:
@@ -1689,14 +1675,15 @@ def page_generate():
             step=100,
         )
 
-        # 3) 6축 가중치
-        st.markdown("**6축 가중치**")
-        w_sigungu = st.slider("시군구", 0.0, 5.0, 1.0, key="w_sigungu")
-        w_gender = st.slider("성별", 0.0, 5.0, 1.0, key="w_gender")
-        w_age = st.slider("연령", 0.0, 5.0, 1.0, key="w_age")
-        w_econ = st.slider("경제활동", 0.0, 5.0, 1.0, key="w_econ")
-        w_income = st.slider("소득", 0.0, 5.0, 1.0, key="w_income")
-        w_edu = st.slider("교육정도", 0.0, 5.0, 1.0, key="w_edu")
+        # 3) 6축 가중치 (클릭하여 펼친 뒤 슬라이더로 변경 가능)
+        with st.expander("**6축 가중치** (클릭하여 펼치고 조정)", expanded=False):
+            w_sigungu = st.slider("시군구", 0.0, 5.0, 1.0, key="w_sigungu")
+            w_gender = st.slider("성별", 0.0, 5.0, 1.0, key="w_gender")
+            w_age = st.slider("연령", 0.0, 5.0, 1.0, key="w_age")
+            w_econ = st.slider("경제활동", 0.0, 5.0, 1.0, key="w_econ")
+            w_income = st.slider("소득", 0.0, 5.0, 1.0, key="w_income")
+            w_edu = st.slider("교육정도", 0.0, 5.0, 1.0, key="w_edu")
+            st.caption("가중치를 높이면 해당 축 분포가 KOSIS 통계에 더 가깝게 반영됩니다.")
 
         # 4) 통계 목표 활성화 (UI만 유지)
         st.markdown("**통계 목표 활성화**")
@@ -1735,20 +1722,22 @@ def page_generate():
                         kosis = KosisClient(use_gemini=False)
                         print("[1단계] KOSIS 클라이언트 준비 완료")
 
-                        # 6축 마진 통계 소스에서 KOSIS 데이터 가져와서 확률 분포로 변환
+                        # 6축 마진 통계 소스에서 KOSIS 데이터 가져와서 확률 분포로 변환 (통계 목록 1회만 조회)
                         with st.spinner("KOSIS 통계 데이터 가져오는 중..."):
                             axis_keys = ["sigungu", "gender", "age", "econ", "income", "edu"]
                             margins_axis = {}
+                            all_stats = get_cached_db_list_stats(sido_code)
                             for axis_key in axis_keys:
                                 margin_stat = get_cached_db_axis_margin_stats(sido_code, axis_key)
                                 if margin_stat and margin_stat.get("stat_id"):
-                                    all_stats = get_cached_db_list_stats(sido_code)
                                     stat_info = next((s for s in all_stats if s["id"] == margin_stat["stat_id"]), None)
                                     if stat_info:
                                         st.info(f"{axis_key} <- [{stat_info['category']}] {stat_info['name']}")
                                         try:
-                                            kosis_data = kosis.fetch_json(stat_info["url"])
-                                            labels, probs = convert_kosis_to_distribution(kosis_data, axis_key)
+                                            kosis_data = get_cached_kosis_json(stat_info["url"])
+                                            labels, probs = convert_kosis_to_distribution_cached(
+                                                json.dumps(kosis_data, sort_keys=True, default=str), axis_key
+                                            )
                                             if labels and probs:
                                                 margins_axis[axis_key] = {"labels": labels, "p": probs}
                                                 st.success(f"{axis_key}: {len(labels)}개 항목 ({sum(probs):.2f} 확률 합)")
@@ -1768,21 +1757,20 @@ def page_generate():
                             if margins_axis and "sigungu" in margins_axis:
                                 sigungu_pool = margins_axis["sigungu"].get("labels", [])
                             import random
-                            seed = 42
-                            base_df = generate_base_population(
+                            # 매 실행마다 다른 이름·6축이 나오도록 랜덤 시드 사용 (중복 가상인물 방지)
+                            base_seed = random.randint(0, 2**31 - 1)
+                            seed = base_seed
+                            base_df = cached_generate_base_population(
                                 n=int(n),
-                                selected_sigungu=[],
-                                weights_6axis={
-                                    'sigungu': w_sigungu,
-                                    'gender': w_gender,
-                                    'age': w_age,
-                                    'econ': w_econ,
-                                    'income': w_income,
-                                    'edu': w_edu,
-                                },
-                                sigungu_pool=sigungu_pool,
+                                selected_sigungu_json=json.dumps([], sort_keys=True),
+                                weights_6axis_json=json.dumps({
+                                    'sigungu': w_sigungu, 'gender': w_gender, 'age': w_age,
+                                    'econ': w_econ, 'income': w_income, 'edu': w_edu,
+                                }, sort_keys=True),
+                                sigungu_pool_json=json.dumps(sigungu_pool, sort_keys=True),
                                 seed=seed,
-                                margins_axis=margins_axis if margins_axis else {},
+                                margins_axis_json=json.dumps(margins_axis if margins_axis else {}, sort_keys=True, default=str),
+                                apply_ipf_flag=True,
                             )
 
                         if base_df is None or base_df.empty:
@@ -1808,22 +1796,19 @@ def page_generate():
                                     retry_count += 1
                                     if retry_count < max_retries:
                                         st.warning(f"평균 오차율 {avg_mae_pct:.2f}% (목표: 5.0% 미만) - {retry_count}회차 재생성 중...")
-                                        # seed 변경하여 재생성
-                                        seed = 42 + retry_count
-                                        base_df = generate_base_population(
+                                        # 재생성 시 다른 결과를 위해 시드 변경
+                                        seed = base_seed + retry_count
+                                        base_df = cached_generate_base_population(
                                             n=int(n),
-                                            selected_sigungu=[],
-                                            weights_6axis={
-                                                'sigungu': w_sigungu,
-                                                'gender': w_gender,
-                                                'age': w_age,
-                                                'econ': w_econ,
-                                                'income': w_income,
-                                                'edu': w_edu,
-                                            },
-                                            sigungu_pool=sigungu_pool,
+                                            selected_sigungu_json=json.dumps([], sort_keys=True),
+                                            weights_6axis_json=json.dumps({
+                                                'sigungu': w_sigungu, 'gender': w_gender, 'age': w_age,
+                                                'econ': w_econ, 'income': w_income, 'edu': w_edu,
+                                            }, sort_keys=True),
+                                            sigungu_pool_json=json.dumps(sigungu_pool, sort_keys=True),
                                             seed=seed,
-                                            margins_axis=margins_axis if margins_axis else {},
+                                            margins_axis_json=json.dumps(margins_axis if margins_axis else {}, sort_keys=True, default=str),
+                                            apply_ipf_flag=True,
                                         )
                                     else:
                                         st.warning(f"최대 재시도 횟수({max_retries}회) 도달. 현재 오차율: {avg_mae_pct:.2f}%")
@@ -2095,7 +2080,7 @@ def page_generate():
                                                     }
                                                     
                                                     try:
-                                                        kosis_data = kosis.fetch_json(stat_info["url"])
+                                                        kosis_data = get_cached_kosis_json(stat_info["url"])
                                                         kosis_data_count = len(kosis_data) if isinstance(kosis_data, list) else 0
                                                         log_entry["kosis_data_count"] = kosis_data_count
                                                         
@@ -2173,27 +2158,37 @@ def page_generate():
                                                             and "소비" in (stat_info.get("name") or "")
                                                         )
                                                         # 프리셋 통계 21종 (거주지역 대중교통, 의료기관, 의료시설 만족도 등)
-                                                        use_public_transport_satisfaction = "거주지역 대중교통 만족도" in (stat_info.get("name") or "")
-                                                        use_medical_facility_main = "의료기관 주 이용시설" in (stat_info.get("name") or "")
-                                                        use_medical_satisfaction = "의료시설 만족도" in (stat_info.get("name") or "")
-                                                        use_welfare_satisfaction = "지역의 사회복지 서비스 만족도" in (stat_info.get("name") or "")
-                                                        use_provincial_satisfaction = "도정만족도" in (stat_info.get("name") or "")
-                                                        use_social_communication = "사회적관계별 소통정도" in (stat_info.get("name") or "")
-                                                        use_trust_people = "일반인에 대한 신뢰" in (stat_info.get("name") or "")
-                                                        use_subjective_class = "주관적 귀속계층" in (stat_info.get("name") or "")
-                                                        use_volunteer = "자원봉사활동" in (stat_info.get("name") or "") and "여부" in (stat_info.get("name") or "")
-                                                        use_donation = "후원금 금액" in (stat_info.get("name") or "")
-                                                        use_regional_belonging = "지역소속감" in (stat_info.get("name") or "")
-                                                        use_safety_eval = "안전환경에 대한 평가" in (stat_info.get("name") or "")
-                                                        use_crime_fear = "일상생활 범죄피해 두려움" in (stat_info.get("name") or "")
-                                                        use_daily_fear = "일상생활에서 두려움" in (stat_info.get("name") or "")
-                                                        use_law_abiding = "자신의 평소 준법수준" in (stat_info.get("name") or "")
-                                                        use_environment_feel = "환경체감도" in (stat_info.get("name") or "")
-                                                        use_time_pressure = "생활시간 압박" in (stat_info.get("name") or "")
-                                                        use_leisure_satisfaction = "여가활동 만족도" in (stat_info.get("name") or "") and "불만족 이유" in (stat_info.get("name") or "")
-                                                        use_culture_attendance = "문화예술행사" in (stat_info.get("name") or "") and "관람" in (stat_info.get("name") or "")
-                                                        use_life_satisfaction = "삶에 대한 만족감과 정서경험" in (stat_info.get("name") or "")
-                                                        use_happiness_level = "행복수준" in (stat_info.get("name") or "")
+                                                        _sn = (stat_info.get("name") or "")
+                                                        use_public_transport_satisfaction = "거주지역 대중교통 만족도" in _sn or ("대중교통" in _sn and "만족도" in _sn)
+                                                        use_medical_facility_main = "의료기관 주 이용시설" in _sn or ("의료기관" in _sn and "이용시설" in _sn)
+                                                        use_medical_satisfaction = "의료시설 만족도" in _sn or ("의료시설" in _sn and "만족도" in _sn)
+                                                        use_welfare_satisfaction = (
+                                                            "지역의 사회복지 서비스 만족도" in _sn
+                                                            or ("임신" in _sn and "복지" in _sn)
+                                                            or ("저소득층" in _sn and "복지" in _sn)
+                                                            or ("사회복지" in _sn and "만족도" in _sn)
+                                                        )
+                                                        use_provincial_satisfaction = "도정만족도" in _sn or "도정정책" in _sn or ("도정" in _sn and "만족도" in _sn) or "행정서비스" in _sn
+                                                        use_social_communication = "사회적관계별 소통정도" in _sn or ("사회적" in _sn and "소통" in _sn)
+                                                        use_trust_people = "일반인에 대한 신뢰" in _sn or ("일반인" in _sn and "신뢰" in _sn)
+                                                        use_subjective_class = "주관적 귀속계층" in _sn or ("주관적" in _sn and "귀속" in _sn)
+                                                        use_volunteer = ("자원봉사활동" in _sn or "자원봉사 활동" in _sn or "자원봉사" in _sn) and ("여부" in _sn or "여부및" in _sn or "시간" in _sn)
+                                                        use_donation = "후원금 금액" in _sn or "후원금" in _sn or ("기부" in _sn and ("여부" in _sn or "금액" in _sn or "방식" in _sn))
+                                                        use_regional_belonging = "지역소속감" in _sn or ("지역" in _sn and "소속감" in _sn) or "동네 소속감" in _sn or "시군 소속감" in _sn
+                                                        use_safety_eval = "안전환경에 대한 평가" in _sn or ("안전환경" in _sn and "평가" in _sn) or ("안전" in _sn and "환경" in _sn and "평가" in _sn)
+                                                        use_crime_fear = "일상생활 범죄피해 두려움" in _sn or ("일상생활" in _sn and "범죄" in _sn and "두려움" in _sn)
+                                                        use_daily_fear = "일상생활에서 두려움" in _sn or ("일상생활" in _sn and "두려움" in _sn and "밤" in _sn)
+                                                        use_law_abiding = "자신의 평소 준법수준" in _sn or ("준법" in _sn and "수준" in _sn) or "평소 준법" in _sn
+                                                        use_environment_feel = "환경체감도" in _sn or ("환경" in _sn and "체감도" in _sn) or "대기환경" in _sn or "수질환경" in _sn
+                                                        use_time_pressure = "생활시간 압박" in _sn or ("생활시간" in _sn and "압박" in _sn)
+                                                        use_leisure_satisfaction = (
+                                                            ("여가활동 만족도" in _sn and "불만족 이유" in _sn)
+                                                            or ("여가활동" in _sn and "불만족" in _sn)
+                                                            or "여가활동 만족도 및 불만족 이유" in _sn
+                                                        )
+                                                        use_culture_attendance = ("문화예술행사" in _sn and "관람" in _sn) or "문화예술행사 관람" in _sn or ("문화예술" in _sn and "관람" in _sn)
+                                                        use_life_satisfaction = "삶에 대한 만족감과 정서경험" in _sn or ("삶에 대한" in _sn and "만족감" in _sn) or ("만족감" in _sn and "정서" in _sn)
+                                                        use_happiness_level = "행복수준" in _sn or ("행복" in _sn and "수준" in _sn)
                                                         two_cols = residence_duration_columns_by_stat.get(
                                                             (str(stat_info.get("category", "")).strip(), str(stat_info.get("name", "")).strip()), []
                                                         )
@@ -2206,9 +2201,9 @@ def page_generate():
                                                             (str(stat_info.get("category", "")).strip(), str(stat_info.get("name", "")).strip()), []
                                                         )
                                                         three_names = [r3 for _, r3 in three_cols]
-                                                        # 학생 및 미취학자녀수: 템플릿에 F·G 2열이 없어도 기본 컬럼명으로 2열 대입
+                                                        # 학생 및 미취학자녀수: 가상인구 DB 컬럼명 기준
                                                         if use_children_student:
-                                                            col_f, col_g = (two_names[0], two_names[1]) if len(two_names) >= 2 else ("자녀유무", "총학생수")
+                                                            col_f, col_g = (two_names[0], two_names[1]) if len(two_names) >= 2 else ("학생 및 미취학 자녀 유무", "학생 및 미취학 자녀 수")
                                                             result_df, success = kosis.assign_children_student_columns(
                                                                 result_df,
                                                                 kosis_data,
@@ -2233,22 +2228,26 @@ def page_generate():
                                                                 column_names=(col_dw, col_occ),
                                                                 seed=42,
                                                             )
-                                                        # 부모님 생존여부 및 동거여부: 2열(생존여부, 부모님 동거 여부)
+                                                        # 부모님 생존여부 및 동거여부: 2열(부모님 생존 여부, 부모님 동거 여부)
                                                         elif use_parents_survival_cohabitation:
-                                                            col_survival, col_cohabitation = (two_names[0], two_names[1]) if len(two_names) >= 2 else ("생존여부", "부모님 동거 여부")
+                                                            col_survival, col_cohabitation = (two_names[0], two_names[1]) if len(two_names) >= 2 else ("부모님 생존 여부", "부모님 동거 여부")
                                                             result_df, success = kosis.assign_parents_survival_cohabitation_columns(
                                                                 result_df,
                                                                 kosis_data,
                                                                 column_names=(col_survival, col_cohabitation),
                                                                 seed=42,
                                                             )
-                                                        # 부모님 생활비 주 제공자: 단일 컬럼
+                                                        # 부모님 생활비 주 제공자: 단일 컬럼 (부모님 생존 여부가 해당없음인 행은 해당없음으로 일관 처리)
                                                         elif use_parents_expense_provider:
                                                             col_expense = "부모님 생활비 주 제공자"
+                                                            col_survival_for_expense = "부모님 생존 여부"
+                                                            if col_survival_for_expense not in result_df.columns:
+                                                                col_survival_for_expense = next((c for c in result_df.columns if "생존" in str(c)), None)
                                                             result_df, success = kosis.assign_parents_expense_provider_column(
                                                                 result_df,
                                                                 kosis_data,
                                                                 column_name=col_expense,
+                                                                survival_column=col_survival_for_expense,
                                                                 seed=42,
                                                             )
                                                         # 현재 거주주택 만족도: 3열
@@ -2300,9 +2299,9 @@ def page_generate():
                                                                 column_name=col_job,
                                                                 seed=42,
                                                             )
-                                                        # 취업자 근로여건 만족도: 5열
+                                                        # 취업자 근로여건 만족도: 5열 (가상인구 DB 컬럼명 기준)
                                                         elif use_work_satisfaction:
-                                                            col_ws = ("하는일", "임금/가구소득", "근로시간", "근무환경", "전반적인 만족도")
+                                                            col_ws = ("하는일 만족도", "임금/가구소득 만족도", "근로시간 만족도", "근무환경 만족도", "근무 여건 전반적인 만족도")
                                                             result_df, success = kosis.assign_work_satisfaction_columns(
                                                                 result_df,
                                                                 kosis_data,
@@ -2336,7 +2335,7 @@ def page_generate():
                                                             )
                                                         elif use_other_region_consumption:
                                                             col_other = (
-                                                                "소비 경험 여부",
+                                                                "경북 외 소비 경험 여부",
                                                                 "경북 외 주요 소비지역",
                                                                 "경북 외 주요 소비 상품 및 서비스(1순위)",
                                                                 "경북 외 주요 소비 상품 및 서비스(2순위)",
@@ -2362,7 +2361,7 @@ def page_generate():
                                                         elif use_welfare_satisfaction:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
-                                                                column_names=("임신·출산·육아에 대한 복지", "저소득층 등 취약계층에 대한 복지"), seed=42)
+                                                                column_names=("임신·출산·육아에 대한 복지 만족도", "저소득층 등 취약계층에 대한 복지 만족도"), seed=42)
                                                         elif use_provincial_satisfaction:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
@@ -2390,23 +2389,23 @@ def page_generate():
                                                         elif use_regional_belonging:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
-                                                                column_names=("동네", "시군", "경상북도"), seed=42)
+                                                                column_names=("동네 소속감", "시군 소속감", "경상북도 소속감"), seed=42)
                                                         elif use_safety_eval:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
                                                                 column_names=(
-                                                                    "어둡고 후미진 곳이 많다", "주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다",
-                                                                    "주변에 방치된 차나 빈 건물이 많다", "무리 지어 다니는 불량 청소년이 많다",
-                                                                    "기초질서(무단횡단, 불법 주정차 등)를 지키지 않는 사람이 많다",
-                                                                    "큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다"), seed=42)
+                                                                    "(안전환경)어둡고 후미진 곳이 많다", "(안전환경)주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다",
+                                                                    "(안전환경)주변에 방치된 차나 빈 건물이 많다", "(안전환경)무리 지어 다니는 불량 청소년이 많다",
+                                                                    "(안전환경)기초질서를 지키지 않는 사람이 많다",
+                                                                    "(안전환경)큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다"), seed=42)
                                                         elif use_crime_fear:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
-                                                                column_names=("나자신", "배우자(애인)", "자녀", "부모"), seed=42)
+                                                                column_names=("(일상생활 범죄피해 두려움)나자신", "(일상생활 범죄피해 두려움)배우자(애인)", "(일상생활 범죄피해 두려움)자녀", "(일상생활 범죄피해 두려움)부모"), seed=42)
                                                         elif use_daily_fear:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
-                                                                column_names=("밤에 혼자 집에 있을 때", "밤에 혼자 지역(동네)의 골목길을 걸을때"), seed=42)
+                                                                column_names=("(일상생활에서 두려움)밤에 혼자 집에 있을 때", "(일상생활에서 두려움)밤에 혼자 지역(동네)의 골목길을 걸을때"), seed=42)
                                                         elif use_law_abiding:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
@@ -2414,7 +2413,7 @@ def page_generate():
                                                         elif use_environment_feel:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
-                                                                column_names=("대기", "수질", "토양", "소음/진동", "녹지환경"), seed=42)
+                                                                column_names=("대기환경 체감도", "수질환경 체감도", "토양환경 체감도", "소음/진동환경 체감도", "녹지환경 체감도"), seed=42)
                                                         elif use_time_pressure:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
@@ -2422,11 +2421,11 @@ def page_generate():
                                                         elif use_leisure_satisfaction:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
-                                                                column_names=("문화여가시설 만족도", "전반적인 여가활동 만족도", "불만족 이유"), seed=42)
+                                                                column_names=("문화여가시설 만족도", "전반적인 여가활동 만족도", "여가활동 불만족 이유"), seed=42)
                                                         elif use_culture_attendance:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
-                                                                column_names=("관람 여부", "관람 분야"), seed=42)
+                                                                column_names=("문화예술행사 관람 여부", "문화예술행사 관람 분야"), seed=42)
                                                         elif use_life_satisfaction:
                                                             result_df, success = kosis.assign_preset_stat_columns(
                                                                 result_df, kosis_data, stat_name=stat_info["name"],
@@ -2602,7 +2601,7 @@ def page_generate():
                                                             elif use_medical_satisfaction:
                                                                 step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["의료시설 만족도"], "is_residence": False, "is_preset": True})
                                                             elif use_welfare_satisfaction:
-                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["임신·출산·육아에 대한 복지", "저소득층 등 취약계층에 대한 복지"], "is_residence": False, "is_preset": True})
+                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["임신·출산·육아에 대한 복지 만족도", "저소득층 등 취약계층에 대한 복지 만족도"], "is_residence": False, "is_preset": True})
                                                             elif use_provincial_satisfaction:
                                                                 step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["도정정책 만족도", "행정서비스 만족도"], "is_residence": False, "is_preset": True})
                                                             elif use_social_communication:
@@ -2616,23 +2615,23 @@ def page_generate():
                                                             elif use_donation:
                                                                 step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["기부 여부", "기부 방식", "기부금액(만원)"], "is_residence": False, "is_preset": True})
                                                             elif use_regional_belonging:
-                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["동네", "시군", "경상북도"], "is_residence": False, "is_preset": True})
+                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["동네 소속감", "시군 소속감", "경상북도 소속감"], "is_residence": False, "is_preset": True})
                                                             elif use_safety_eval:
-                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["어둡고 후미진 곳이 많다", "주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다", "주변에 방치된 차나 빈 건물이 많다", "무리 지어 다니는 불량 청소년이 많다", "기초질서(무단횡단, 불법 주정차 등)를 지키지 않는 사람이 많다", "큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다"], "is_residence": False, "is_preset": True})
+                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["(안전환경)어둡고 후미진 곳이 많다", "(안전환경)주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다", "(안전환경)주변에 방치된 차나 빈 건물이 많다", "(안전환경)무리 지어 다니는 불량 청소년이 많다", "(안전환경)기초질서를 지키지 않는 사람이 많다", "(안전환경)큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다"], "is_residence": False, "is_preset": True})
                                                             elif use_crime_fear:
-                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["나자신", "배우자(애인)", "자녀", "부모"], "is_residence": False, "is_preset": True})
+                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["(일상생활 범죄피해 두려움)나자신", "(일상생활 범죄피해 두려움)배우자(애인)", "(일상생활 범죄피해 두려움)자녀", "(일상생활 범죄피해 두려움)부모"], "is_residence": False, "is_preset": True})
                                                             elif use_daily_fear:
-                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["밤에 혼자 집에 있을 때", "밤에 혼자 지역(동네)의 골목길을 걸을때"], "is_residence": False, "is_preset": True})
+                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["(일상생활에서 두려움)밤에 혼자 집에 있을 때", "(일상생활에서 두려움)밤에 혼자 지역(동네)의 골목길을 걸을때"], "is_residence": False, "is_preset": True})
                                                             elif use_law_abiding:
                                                                 step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["자신의 평소 준법수준", "평소 법을 지키지 않는 주된 이유"], "is_residence": False, "is_preset": True})
                                                             elif use_environment_feel:
-                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["대기", "수질", "토양", "소음/진동", "녹지환경"], "is_residence": False, "is_preset": True})
+                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["대기환경 체감도", "수질환경 체감도", "토양환경 체감도", "소음/진동환경 체감도", "녹지환경 체감도"], "is_residence": False, "is_preset": True})
                                                             elif use_time_pressure:
                                                                 step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["평일 생활시간 압박", "주말 생활시간 압박"], "is_residence": False, "is_preset": True})
                                                             elif use_leisure_satisfaction:
-                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["문화여가시설 만족도", "전반적인 여가활동 만족도", "불만족 이유"], "is_residence": False, "is_preset": True})
+                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["문화여가시설 만족도", "전반적인 여가활동 만족도", "여가활동 불만족 이유"], "is_residence": False, "is_preset": True})
                                                             elif use_culture_attendance:
-                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["관람 여부", "관람 분야"], "is_residence": False, "is_preset": True})
+                                                                step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["문화예술행사 관람 여부", "문화예술행사 관람 분야"], "is_residence": False, "is_preset": True})
                                                             elif use_life_satisfaction:
                                                                 step2_validation_info.append({"stat_name": stat_info.get("name", ""), "url": stat_info.get("url", ""), "columns": ["삶에 대한 전반적 만족감(10점 만점)", "살고있는 지역의 전반적 만족감(10점 만점)", "어제 행복 정도(10점 만점)", "어제 걱정 정도(10점 만점)"], "is_residence": False, "is_preset": True})
                                                             elif use_happiness_level:
@@ -2738,157 +2737,163 @@ def page_generate():
                                 st.rerun()
         
         st.markdown("---")
-        
-        # 탭 구성: 요약, 그래프, 검증, 데이터, 다운로드 (2단계 완료 시에도 동일, df가 step2_df를 포함)
-        tabs = st.tabs(["요약", "그래프", "검증", "데이터", "다운로드"])
-        
-        # [탭 0] 요약 — 2단계 완료 시 추가 통계만, 아니면 1단계 요약
-        with tabs[0]:
-            if is_step2:
-                # 2단계: 추가 통계 데이터만 요약 (1단계 항목 제거)
-                st.markdown("### 2단계 추가 통계 요약")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("지역", sido_name)
-                with col2:
-                    st.metric("총 인구수", f"{len(df):,}명")
-                with col3:
-                    st.metric("추가 통계 컬럼 수", len(st.session_state.get("step2_added_columns") or []))
-                added_cols = st.session_state.get("step2_added_columns") or []
-                added_cols = [c for c in added_cols if c in df.columns]
-                if added_cols:
-                    st.markdown("---")
-                    for col in added_cols:
-                        vc = df[col].value_counts()
-                        total = len(df)
-                        top3 = vc.head(3)
-                        summary_parts = [f"{k}: {v}명({v/total*100:.1f}%)" for k, v in top3.items() if str(k).strip()]
-                        if summary_parts:
-                            st.markdown(f"**{col}**")
-                            st.write(", ".join(summary_parts))
-                else:
-                    st.caption("추가된 통계 컬럼이 없습니다.")
-            else:
-                # 1단계: 기존 요약
+        # 결과 뷰용 세션 저장 (fragment 격리 실행 시에도 동일 데이터 사용)
+        st.session_state["_rv_df"] = df
+        st.session_state["_rv_is_step2"] = is_step2
+        st.session_state["_rv_sido_name"] = sido_name
+        st.session_state["_rv_n"] = n
+        st.session_state["_rv_weights"] = weights or {}
+        st.session_state["_rv_report"] = report or ""
+        _fragment_result_tabs()
+
+
+@st.fragment
+def _fragment_result_tabs():
+    """요약·그래프·검증·데이터·다운로드 탭을 fragment로 렌더. 탭 내 상호작용 시 이 블록만 갱신."""
+    df = st.session_state.get("_rv_df")
+    is_step2 = st.session_state.get("_rv_is_step2", False)
+    sido_name = st.session_state.get("_rv_sido_name", "알 수 없음")
+    n = st.session_state.get("_rv_n", 0)
+    weights = st.session_state.get("_rv_weights") or {}
+    report = st.session_state.get("_rv_report", "")
+    if df is None or df.empty:
+        st.warning("표시할 데이터가 없습니다.")
+        return
+    tabs = st.tabs(["요약", "그래프", "검증", "데이터", "다운로드"])
+    # [탭 0] 요약
+    with tabs[0]:
+        if is_step2:
+            # 2단계: 추가 통계 데이터만 요약 (1단계 항목 제거)
+            st.markdown("### 2단계 추가 통계 요약")
+            col1, col2, col3 = st.columns(3)
+            with col1:
                 st.metric("지역", sido_name)
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("생성 인구수", f"{n:,}명")
-                with col2:
-                    st.metric("실제 생성", f"{len(df):,}명")
-                if "성별" in df.columns:
-                    gender_counts = df["성별"].value_counts()
-                    total = len(df)
-                    gender_ratio = {k: (v/total*100) for k, v in gender_counts.items()}
-                    col3, col4 = st.columns(2)
-                    with col3:
-                        st.metric("남자 비율", f"{gender_ratio.get('남자', gender_ratio.get('남', 0)):.1f}%")
-                    with col4:
-                        st.metric("여자 비율", f"{gender_ratio.get('여자', gender_ratio.get('여', 0)):.1f}%")
-                if "연령" in df.columns:
-                    age_counts = df["연령"].value_counts()
-                    total = len(df)
-                    top_ages = age_counts.head(2)
-                    col5, col6 = st.columns(2)
-                    for idx, (age, count) in enumerate(top_ages.items()):
-                        with (col5 if idx == 0 else col6):
-                            st.metric(f"주요 연령대 {idx+1}위", f"{age}세", f"{(count/total*100):.1f}%")
+            with col2:
+                st.metric("총 인구수", f"{len(df):,}명")
+            with col3:
+                st.metric("추가 통계 컬럼 수", len(st.session_state.get("step2_added_columns") or []))
+            added_cols = st.session_state.get("step2_added_columns") or []
+            added_cols = [c for c in added_cols if c in df.columns]
+            if added_cols:
                 st.markdown("---")
-                st.markdown("**6축 가중치**")
-                for k, v in weights.items():
-                    st.write(f"- {k}: {v}")
-                if report:
-                    st.markdown("**생성 결과**")
-                    st.info(report)
-        
-        # [탭 1] 그래프 — 2단계 완료 시 추가 통계만, 아니면 6축
-        with tabs[1]:
-            if is_step2:
-                step2_cols = [c for c in (st.session_state.get("step2_added_columns") or []) if c in df.columns]
-                if step2_cols:
-                    st.markdown("### 2단계 추가 통계 분포")
-                    draw_charts(df, step2_columns=step2_cols, step2_only=True)
+                for col in added_cols:
+                    vc = df[col].value_counts()
+                    total = len(df)
+                    top3 = vc.head(3)
+                    summary_parts = [f"{k}: {v}명({v/total*100:.1f}%)" for k, v in top3.items() if str(k).strip()]
+                    if summary_parts:
+                        st.markdown(f"**{col}**")
+                        st.write(", ".join(summary_parts))
+            else:
+                st.caption("추가된 통계 컬럼이 없습니다.")
+        else:
+            # 1단계: 기존 요약
+            st.metric("지역", sido_name)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("생성 인구수", f"{n:,}명")
+            with col2:
+                st.metric("실제 생성", f"{len(df):,}명")
+            if "성별" in df.columns:
+                gender_counts = df["성별"].value_counts()
+                total = len(df)
+                gender_ratio = {k: (v/total*100) for k, v in gender_counts.items()}
+                col3, col4 = st.columns(2)
+                with col3:
+                    st.metric("남자 비율", f"{gender_ratio.get('남자', gender_ratio.get('남', 0)):.1f}%")
+                with col4:
+                    st.metric("여자 비율", f"{gender_ratio.get('여자', gender_ratio.get('여', 0)):.1f}%")
+            if "연령" in df.columns:
+                age_counts = df["연령"].value_counts()
+                total = len(df)
+                top_ages = age_counts.head(2)
+                col5, col6 = st.columns(2)
+                for idx, (age, count) in enumerate(top_ages.items()):
+                    with (col5 if idx == 0 else col6):
+                        st.metric(f"주요 연령대 {idx+1}위", f"{age}세", f"{(count/total*100):.1f}%")
+            st.markdown("---")
+            st.markdown("**6축 가중치**")
+            for k, v in weights.items():
+                st.write(f"- {k}: {v}")
+            if report:
+                st.markdown("**생성 결과**")
+                st.info(report)
+    # [탭 1] 그래프 — fragment로 분리해 그래프 탭 내 상호작용 시 부분 갱신
+    with tabs[1]:
+        if is_step2:
+            step2_cols = [c for c in (st.session_state.get("step2_added_columns") or []) if c in df.columns]
+            if step2_cols:
+                st.markdown("### 2단계 추가 통계 분포")
+                _fragment_draw_charts(step2_only=True)
+            else:
+                st.info("추가된 통계 컬럼이 없습니다.")
+        else:
+            _fragment_draw_charts(step2_only=False)
+    # [탭 2] 검증 — 2단계 완료 시 KOSIS 대비 검증(1단계와 동일 방식), 아니면 1단계 6축 검증
+    with tabs[2]:
+        if is_step2:
+            step2_val_info = st.session_state.get("step2_validation_info") or []
+            if step2_val_info:
+                st.markdown("### 2단계 추가 통계 · KOSIS 대비 검증")
+                kosis_for_val = KosisClient(use_gemini=False)
+                step2_error_report = build_step2_error_report(df, step2_val_info, kosis_for_val)
+                if step2_error_report:
+                    render_validation_tab(df, margins_axis=None, error_report=step2_error_report)
                 else:
-                    st.info("추가된 통계 컬럼이 없습니다.")
+                    st.warning("KOSIS 데이터를 불러와 검증 정보를 만들 수 없습니다. URL 또는 통계 구성을 확인해주세요.")
             else:
-                draw_charts(df, step2_columns=None)
-        
-        # [탭 2] 검증 — 2단계 완료 시 KOSIS 대비 검증(1단계와 동일 방식), 아니면 1단계 6축 검증
-        with tabs[2]:
-            if is_step2:
-                step2_val_info = st.session_state.get("step2_validation_info") or []
-                if step2_val_info:
-                    st.markdown("### 2단계 추가 통계 · KOSIS 대비 검증")
-                    kosis_for_val = KosisClient(use_gemini=False)
-                    step2_error_report = build_step2_error_report(df, step2_val_info, kosis_for_val)
-                    if step2_error_report:
-                        render_validation_tab(df, margins_axis=None, error_report=step2_error_report)
-                    else:
-                        st.warning("KOSIS 데이터를 불러와 검증 정보를 만들 수 없습니다. URL 또는 통계 구성을 확인해주세요.")
-                else:
-                    st.info("2단계에서 대입된 통계가 없거나 검증 정보가 없습니다.")
-            else:
-                margins_axis = st.session_state.get("step1_margins_axis") or st.session_state.get("generated_margins_axis")
-                error_report = st.session_state.get("step1_error_report") or st.session_state.get("generated_error_report")
-                if not error_report and margins_axis:
-                    avg_mae, error_report = calculate_mape(df, margins_axis)
-                    st.session_state["step1_error_report"] = error_report
-                    st.session_state["step1_final_mae"] = avg_mae
-                render_validation_tab(df, margins_axis, error_report)
-        
-        # [탭 3] 데이터 (2단계 완료 시 추가된 통계 포함)
-        tab_data_idx = 3
-        with tabs[tab_data_idx]:
-            if is_step2:
-                st.markdown("### 생성된 데이터 미리보기 (2단계 완료: 추가 통계 포함)")
-            else:
-                st.markdown("### 생성된 데이터 미리보기")
-            
-            # 2단계 완료 시 출력용 컬럼명으로 변환하여 표시
-            df_preview = _apply_step2_column_rename(df.copy()) if is_step2 else df
-            st.dataframe(df_preview.head(100), height=400, use_container_width=True)
-        
-        # [탭 4] 다운로드
-        tab_download_idx = 4
-        with tabs[tab_download_idx]:
-            st.markdown("### 다운로드")
-            
-            # 2단계 완료 시 출력용 컬럼명으로 변환
-            df_export = _apply_step2_column_rename(df.copy()) if is_step2 else df
-            
-            # Excel: 데이터프레임 컬럼 순서대로 1행 헤더 + 데이터 (추가 통계는 오른쪽에 열로 이어짐)
-            final_excel_bytes = None
-            try:
-                import io
-                buf = io.BytesIO()
-                df_export.to_excel(buf, index=False, engine="openpyxl")
-                buf.seek(0)
-                final_excel_bytes = buf.getvalue()
-                st.session_state["generated_excel"] = final_excel_bytes
-            except Exception as e:
-                st.warning(f"Excel 생성 실패: {e}")
-                final_excel_bytes = st.session_state.get("generated_excel")
-            
-            if final_excel_bytes:
-                col_dl1, col_dl2 = st.columns(2)
-                with col_dl1:
-                    file_suffix = "_step2_final" if is_step2 else "_step1"
-                    st.download_button(
-                        "Excel 다운로드",
-                        data=final_excel_bytes,
-                        file_name=f"{sido_name}_synthetic_population{file_suffix}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-                with col_dl2:
-                    csv = df_export.to_csv(index=False).encode("utf-8-sig")
-                    st.download_button(
-                        "CSV 다운로드",
-                        data=csv,
-                        file_name=f"{sido_name}_synthetic_population{file_suffix}.csv",
-                        mime="text/csv",
-                    )
-            else:
-                st.info("Excel 파일이 생성되지 않았습니다.")
+                st.info("2단계에서 대입된 통계가 없거나 검증 정보가 없습니다.")
+        else:
+            margins_axis = st.session_state.get("step1_margins_axis") or st.session_state.get("generated_margins_axis")
+            error_report = st.session_state.get("step1_error_report") or st.session_state.get("generated_error_report")
+            if not error_report and margins_axis:
+                avg_mae, error_report = calculate_mape(df, margins_axis)
+                st.session_state["step1_error_report"] = error_report
+                st.session_state["step1_final_mae"] = avg_mae
+            render_validation_tab(df, margins_axis, error_report)
+    # [탭 3] 데이터 (2단계 완료 시 추가된 통계 포함)
+    with tabs[3]:
+        if is_step2:
+            st.markdown("### 생성된 데이터 미리보기 (2단계 완료: 추가 통계 포함)")
+        else:
+            st.markdown("### 생성된 데이터 미리보기")
+        df_preview = _apply_step2_column_rename(df.copy()) if is_step2 else df
+        st.dataframe(df_preview.head(100), height=400, use_container_width=True)
+    # [탭 4] 다운로드
+    with tabs[4]:
+        st.markdown("### 다운로드")
+        df_export = _apply_step2_column_rename(df.copy()) if is_step2 else df
+        final_excel_bytes = None
+        try:
+            import io
+            buf = io.BytesIO()
+            df_export.to_excel(buf, index=False, engine="openpyxl")
+            buf.seek(0)
+            final_excel_bytes = buf.getvalue()
+            st.session_state["generated_excel"] = final_excel_bytes
+        except Exception as e:
+            st.warning(f"Excel 생성 실패: {e}")
+            final_excel_bytes = st.session_state.get("generated_excel")
+        if final_excel_bytes:
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                file_suffix = "_step2_final" if is_step2 else "_step1"
+                st.download_button(
+                    "Excel 다운로드",
+                    data=final_excel_bytes,
+                    file_name=f"{sido_name}_synthetic_population{file_suffix}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            with col_dl2:
+                csv = df_export.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "CSV 다운로드",
+                    data=csv,
+                    file_name=f"{sido_name}_synthetic_population{file_suffix}.csv",
+                    mime="text/csv",
+                )
+        else:
+            st.info("Excel 파일이 생성되지 않았습니다.")
 
 
 def page_step2_results():
@@ -2919,8 +2924,9 @@ def page_step2_results():
 
 
 
+@st.fragment
 def page_stat_assignment_log():
-    """통계 대입 로그 페이지 - 2단계 통계 대입 시 발생하는 상세 로그"""
+    """통계 대입 로그 페이지 - 2단계 통계 대입 시 발생하는 상세 로그 (fragment: 로그 영역만 갱신)"""
     st.header("통계 대입 로그")
     
     # 세션에서 통계 대입 로그 가져오기
@@ -3055,12 +3061,11 @@ def page_stat_assignment_log():
             with st.expander("전체 로그 데이터 (JSON)", expanded=False):
                 st.json(log)
     
-    # 로그 초기화 버튼
+    # 로그 초기화 버튼 (fragment 내부이므로 클릭 시 이 fragment만 갱신)
     col1, col2 = st.columns([1, 5])
     with col1:
         if st.button("로그 삭제", key="stat_assignment_log_delete"):
             st.session_state.stat_assignment_logs = []
-            st.rerun()
 
 
 def page_guide():
@@ -3440,32 +3445,103 @@ def _ensure_generate_modules() -> None:
         raise
 
 
-def main():
-    # 무거운 라이브러리는 실제 앱 진입 시에만 로드 (Lazy Loading)
-    global pd, np
-    import pandas as pd
-    import numpy as np
+def _run_page_vdb():
+    st.title(APP_TITLE)
+    from pages.virtual_population_db import page_virtual_population_db
+    page_virtual_population_db()
 
+
+def _run_page_generate():
+    st.title(APP_TITLE)
+    try:
+        _ensure_generate_modules()
+    except Exception as e:
+        st.error("가상인구 생성 모듈 로드 실패: " + str(e))
+        st.code(traceback.format_exc())
+    else:
+        gen_tabs = st.tabs(["데이터 관리", "생성", "2차 대입 결과", "통계 대입 로그"])
+        with gen_tabs[0]:
+            page_data_management()
+        with gen_tabs[1]:
+            page_generate()
+        with gen_tabs[2]:
+            page_step2_results()
+        with gen_tabs[3]:
+            page_stat_assignment_log()
+
+
+def _run_page_survey():
+    st.title(APP_TITLE)
+    from pages.survey import page_survey
+    page_survey()
+
+
+def _run_page_conjoint():
+    st.title(APP_TITLE)
+    from pages.result_analysis_conjoint import page_conjoint_analysis
+    page_conjoint_analysis()
+
+
+def _run_page_psm():
+    st.title(APP_TITLE)
+    from pages.result_analysis_psm import page_psm
+    page_psm()
+
+
+def _run_page_bass():
+    st.title(APP_TITLE)
+    from pages.result_analysis_bass import page_bass
+    page_bass()
+
+
+def _run_page_statcheck():
+    st.title(APP_TITLE)
+    from pages.result_analysis_statcheck import page_statcheck
+    page_statcheck()
+
+
+def _run_page_bg_removal():
+    st.title(APP_TITLE)
+    try:
+        from pages.utils_background_removal import page_photo_background_removal
+        page_photo_background_removal()
+    except Exception as e:
+        st.markdown("## 사진 배경제거")
+        st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_background_removal.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
+        st.caption(str(e))
+
+
+def _run_page_clothing():
+    st.title(APP_TITLE)
+    try:
+        from pages.utils_clothing_change import page_photo_clothing_change
+        page_photo_clothing_change()
+    except Exception as e:
+        st.markdown("## 사진 옷 변경")
+        st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_clothing_change.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
+        st.caption(str(e))
+
+
+def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     
-    # Streamlit 자동 페이지 감지로 인한 pages/ 폴더 파일 숨김 + 페이지 전환 시 잔상 방지 (전역 CSS)
+    # 페이지 전환 시 이전 콘텐츠 잔상(ghosting) 방지 (st.navigation 메뉴는 사이드바에 그대로 표시)
     st.markdown("""
     <style>
-    /* Streamlit 자동 페이지 감지 숨김 - pages/ 폴더의 파일들이 자동으로 페이지로 표시되는 것을 방지 */
-    [data-testid="stSidebarNav"] { display: none !important; }
-    /* 페이지 전환 시 이전 콘텐츠 잔상(ghosting) 방지: 메인 영역 불투명도 고정 */
     [data-testid="stAppViewContainer"] main .block-container { opacity: 1 !important; }
     </style>
     """, unsafe_allow_html=True)
 
-    # 배포 환경에서 첫 응답을 빨리 보내기 위해, DB 초기화를 스피너 안에서 실행
-    with st.spinner("준비 중…"):
-        try:
-            db_init()
-            st.session_state.pop("db_init_error", None)
-        except Exception as e:
-            st.session_state.db_init_error = str(e)
-        ensure_session_state()
+    # DB 초기화는 세션당 1회만 실행 (재실행/페이지 이동 시 스피너·초기화 생략)
+    if not st.session_state.get("_db_initialized", False):
+        with st.spinner("준비 중…"):
+            try:
+                db_init()
+                st.session_state.pop("db_init_error", None)
+                st.session_state["_db_initialized"] = True
+            except Exception as e:
+                st.session_state.db_init_error = str(e)
+    ensure_session_state()
 
     if not st.session_state.get("app_started", False):
         render_landing()
@@ -3473,155 +3549,23 @@ def main():
             st.error("DB 초기화 실패 (배포 환경에서는 정상일 수 있음): " + st.session_state.db_init_error)
         return
 
-    # 현재 선택된 페이지 확인 (사이드바 렌더링 전에 확인)
-    selected = st.session_state.nav_selected
-    if selected in ("설문조사", "심층면접", "설문조사/심층면접"):
-        st.session_state.nav_selected = "시장성 조사 설계"
-        selected = "시장성 조사 설계"
-    _prev_nav = st.session_state.get("_prev_nav_selected")
+    # st.navigation: 페이지 전환 시 st.rerun() 없이 전환되어 깜빡임·지연 최소화
+    page_vdb = st.Page(_run_page_vdb, title="가상인구 DB", default=True)
+    page_gen = st.Page(_run_page_generate, title="가상인구 생성")
+    page_survey = st.Page(_run_page_survey, title="시장성 조사 설계")
+    page_conjoint = st.Page(_run_page_conjoint, title="[선호도 분석]컨조인트 분석")
+    page_psm = st.Page(_run_page_psm, title="[가격 수용성]PSM")
+    page_bass = st.Page(_run_page_bass, title="[시장 확산 예측]Bass 확산 모델")
+    page_statcheck = st.Page(_run_page_statcheck, title="[가설 검증]A/B 테스트 검증")
+    page_bg = st.Page(_run_page_bg_removal, title="사진 배경제거")
+    page_cloth = st.Page(_run_page_clothing, title="사진 옷 변경")
 
-    # 페이지 변경 감지: 이전 페이지와 다르면 플래그만 설정 (메인은 아래 st.empty() 컨테이너에서 통째로 교체)
-    if _prev_nav is not None and _prev_nav != selected:
-        st.session_state["_page_just_switched"] = True
-    st.session_state["_prev_nav_selected"] = selected
-
-    with st.sidebar:
-        st.markdown("""
-        <style>
-        /* 사이드바: 내비게이션만 표시, Streamlit 기본 페이지 목록·푸터 등 숨김 */
-        [data-testid="stSidebarNav"] { display: none !important; }
-        [data-testid="stSidebar"] [data-testid="stMarkdown"] a[href*="streamlit"] { display: none !important; }
-        [data-testid="stSidebarNav"] ul li a[href*="survey"] { display: none !important; }
-        [data-testid="stSidebarNav"] ul li a[href*="interview"] { display: none !important; }
-        /* 사이드바 내비 버튼: primary/secondary 동일 크기 유지 (클릭 시 커지지 않음) */
-        [data-testid="stSidebar"] .stButton > button {
-            min-height: 2.25rem !important;
-            height: 2.25rem !important;
-            padding: 0.25rem 1rem !important;
-            font-size: 0.9rem !important;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        st.markdown("## 내비게이션")
-        _nav = st.session_state.nav_selected
-        st.markdown("**AI Social Twin**")
-        if st.button("가상인구 DB", key="nav_vdb", use_container_width=True, type="primary" if _nav == "가상인구 DB" else "secondary"):
-            st.session_state.nav_selected = "가상인구 DB"
-            st.rerun()
-        if st.button("가상인구 생성", key="nav_gen", use_container_width=True, type="primary" if _nav == "가상인구 생성" else "secondary"):
-            st.session_state.nav_selected = "가상인구 생성"
-            st.rerun()
-        if st.button("시장성 조사 설계", key="nav_survey", use_container_width=True, type="primary" if _nav == "시장성 조사 설계" else "secondary"):
-            st.session_state.nav_selected = "시장성 조사 설계"
-            st.rerun()
-        st.markdown("---")
-        st.markdown("**Result analysis**")
-        if st.button("[선호도 분석]컨조인트 분석", key="nav_conjoint", use_container_width=True, type="primary" if _nav == "[선호도 분석]컨조인트 분석" else "secondary"):
-            st.session_state.nav_selected = "[선호도 분석]컨조인트 분석"
-            st.rerun()
-        if st.button("[가격 수용성]PSM", key="nav_psm", use_container_width=True, type="primary" if _nav == "[가격 수용성]PSM" else "secondary"):
-            st.session_state.nav_selected = "[가격 수용성]PSM"
-            st.rerun()
-        if st.button("[시장 확산 예측]Bass 확산 모델", key="nav_bass", use_container_width=True, type="primary" if _nav == "[시장 확산 예측]Bass 확산 모델" else "secondary"):
-            st.session_state.nav_selected = "[시장 확산 예측]Bass 확산 모델"
-            st.rerun()
-        if st.button("[가설 검증]A/B 테스트 검증", key="nav_statcheck", use_container_width=True, type="primary" if _nav == "[가설 검증]A/B 테스트 검증" else "secondary"):
-            st.session_state.nav_selected = "[가설 검증]A/B 테스트 검증"
-            st.rerun()
-        st.markdown("---")
-        st.markdown("**Utils**")
-        if st.button("사진 배경제거", key="nav_bg", use_container_width=True, type="primary" if _nav == "사진 배경제거" else "secondary"):
-            st.session_state.nav_selected = "사진 배경제거"
-            st.rerun()
-        if st.button("사진 옷 변경", key="nav_cloth", use_container_width=True, type="primary" if _nav == "사진 옷 변경" else "secondary"):
-            st.session_state.nav_selected = "사진 옷 변경"
-            st.rerun()
-
-    # 메인 영역: st.empty() 컨테이너로 감싸 페이지 전환 시 이전 레이아웃이 잔상으로 남지 않도록 완전히 새로 그리기
-    main_placeholder = st.empty()
-    with main_placeholder.container():
-        # 시장성 조사 설계 페이지는 자체 타이틀 사용
-        if selected not in ["시장성 조사 설계"]:
-            st.title(APP_TITLE)
-
-        if selected == "가상인구 DB":
-            from pages.virtual_population_db import page_virtual_population_db
-            page_virtual_population_db()
-
-        elif selected == "가상인구 생성":
-            try:
-                _ensure_generate_modules()
-            except Exception as e:
-                st.error("가상인구 생성 모듈 로드 실패: " + str(e))
-                import traceback as _tb
-                st.code(_tb.format_exc())
-            else:
-                sub = st.tabs(["데이터 관리", "생성", "2차 대입 결과", "통계 대입 로그"])
-                with sub[0]:
-                    page_data_management()
-                with sub[1]:
-                    page_generate()
-                with sub[2]:
-                    page_step2_results()
-                with sub[3]:
-                    page_stat_assignment_log()
-
-        elif selected == "생성 결과 목록":
-            from pages.results_archive import page_results_archive
-            page_results_archive()
-
-        elif selected == "시장성 조사 설계":
-            from pages.survey import page_survey
-            page_survey()
-
-        elif selected == "[선호도 분석]컨조인트 분석":
-            from pages.result_analysis_conjoint import page_conjoint_analysis
-            page_conjoint_analysis()
-
-        elif selected == "[가격 수용성]PSM":
-            from pages.result_analysis_psm import page_psm
-            page_psm()
-
-        elif selected == "[시장 확산 예측]Bass 확산 모델":
-            from pages.result_analysis_bass import page_bass
-            page_bass()
-
-        elif selected == "[가설 검증]A/B 테스트 검증":
-            from pages.result_analysis_statcheck import page_statcheck
-            page_statcheck()
-
-        elif selected == "사진 배경제거":
-            try:
-                from pages.utils_background_removal import page_photo_background_removal
-                page_photo_background_removal()
-            except Exception as e:
-                st.markdown("## 사진 배경제거")
-                st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_background_removal.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
-                st.caption(str(e))
-
-        elif selected == "사진 옷 변경":
-            try:
-                from pages.utils_clothing_change import page_photo_clothing_change
-                page_photo_clothing_change()
-            except Exception as e:
-                st.markdown("## 사진 옷 변경")
-                st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_clothing_change.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
-                st.caption(str(e))
-
-        elif selected == "Conjoint Analysis":
-            st.markdown("## Conjoint Analysis Pro")
-            st.info(
-                "**Conjoint Analysis Pro**는 React 기반 프론트엔드 앱입니다. "
-                "이 기능을 사용하려면 별도의 React 개발 서버에서 실행해 주세요."
-            )
-            st.markdown("""
-            - `pages/Conjoint Analysis Pro.py` 는 React/TypeScript 소스입니다.
-            - React 앱으로 실행: 해당 프로젝트 폴더에서 `npm install` 후 `npm start` 로 실행할 수 있습니다.
-            """)
-            st.caption("콘조인트 분석 · OLS 회귀 기반 마케팅 인텔리전스 도구")
-
-    # 페이지 전환 직후 플래그 해제 (다음 런부터는 일반 렌더)
-    st.session_state.pop("_page_just_switched", None)
+    nav = st.navigation({
+        "AI Social Twin": [page_vdb, page_gen, page_survey],
+        "Result analysis": [page_conjoint, page_psm, page_bass, page_statcheck],
+        "Utils": [page_bg, page_cloth],
+    })
+    nav.run()
 
 
 if __name__ == "__main__":

@@ -938,7 +938,7 @@ class KosisClient:
         return out, True
 
     # -----------------------------
-    # 부모님 생존여부 및 동거여부: 2열(생존여부, 부모님 동거 여부)
+    # 부모님 생존여부 및 동거여부: 2열(부모님 생존 여부, 부모님 동거 여부)
     # KOSIS C2 B01* = 생존여부, B02* = 동거여부. C1_NM별(연령대 등) 분포 사용 + 행 간 논리 일관성
     # - 생존=해당없음 이면 동거=같이 살고 있지 않음 고정
     # - 연령대별 생존 분포 사용 (고령일수록 해당없음 비율 높음)
@@ -1113,7 +1113,7 @@ class KosisClient:
         pop_df: pd.DataFrame,
         kosis_data: List[Dict[str, Any]],
         *,
-        column_names: Tuple[str, str] = ("생존여부", "부모님 동거 여부"),
+        column_names: Tuple[str, str] = ("부모님 생존 여부", "부모님 동거 여부"),
         seed: Optional[int] = None,
         age_cap: Optional[int] = 75,
     ) -> Tuple[pd.DataFrame, bool]:
@@ -1226,12 +1226,13 @@ class KosisClient:
         kosis_data: List[Dict[str, Any]],
         *,
         column_name: str = "부모님 생활비 주 제공자",
+        survival_column: Optional[str] = None,
         seed: Optional[int] = None,
     ) -> Tuple[pd.DataFrame, bool]:
         """
         '부모님 생활비 주 제공자' 단일 컬럼을 비율 분포로 샘플링해 채움.
-        값: 장남 또는 맏며느리, 아들 또는 며느리, 딸 또는 사위, 모든 자녀, 부모님 스스로 해결,
-            정부 또는 사회단체, 가족과 정부, 사회단체, 기타 (KOSIS C2_NM 문자열 그대로).
+        survival_column이 있으면, 해당 열이 '해당없음'(부모 미생존)인 행은 생활비 주 제공자를
+        '해당없음'으로 채워 개연성을 유지한다.
         """
         out = pop_df.copy()
         n = len(out)
@@ -1250,7 +1251,17 @@ class KosisClient:
             probs = [p / sum(probs) for p in probs]
         if seed is not None:
             np.random.seed(seed)
-        out[column_name] = [str(np.random.choice(labels, p=probs)) for _ in range(n)]
+        # 부모님 생존 여부 열이 있으면 해당없음인 행은 생활비 주 제공자도 해당없음
+        if survival_column and survival_column in out.columns:
+            out[column_name] = ""
+            for idx, row in out.iterrows():
+                surv = str(row.get(survival_column, "") or "").strip().replace(" ", "")
+                if surv == "해당없음":
+                    out.at[idx, column_name] = "해당없음"
+                else:
+                    out.at[idx, column_name] = str(np.random.choice(labels, p=probs))
+        else:
+            out[column_name] = [str(np.random.choice(labels, p=probs)) for _ in range(n)]
         return out, True
 
     # -----------------------------
@@ -1833,11 +1844,11 @@ class KosisClient:
         kosis_data: List[Dict[str, Any]],
         *,
         column_names: Tuple[str, str, str, str, str] = (
-            "하는일",
-            "임금/가구소득",
-            "근로시간",
-            "근무환경",
-            "전반적인 만족도",
+            "하는일 만족도",
+            "임금/가구소득 만족도",
+            "근로시간 만족도",
+            "근무환경 만족도",
+            "근무 여건 전반적인 만족도",
         ),
         seed: Optional[int] = None,
     ) -> Tuple[pd.DataFrame, bool]:
@@ -2254,7 +2265,7 @@ class KosisClient:
         kosis_data: List[Dict[str, Any]],
         *,
         column_names: Tuple[str, str, str, str] = (
-            "소비 경험 여부",
+            "경북 외 소비 경험 여부",
             "경북 외 주요 소비지역",
             "경북 외 주요 소비 상품 및 서비스(1순위)",
             "경북 외 주요 소비 상품 및 서비스(2순위)",
@@ -2772,8 +2783,36 @@ PRESET_STAT_CONFIG: Dict[str, Dict[str, Any]] = {
         "mode": "c2_c3",
         "c1_all_only": True,
         "c2_to_col": {
-            "임신·출산·육아에 대한 복지": "임신·출산·육아에 대한 복지",
-            "저소득층 등 취약계층에 대한 복지": "저소득층 등 취약계층에 대한 복지",
+            "임신·출산·육아에 대한 복지": "임신·출산·육아에 대한 복지 만족도",
+            "저소득층 등 취약계층에 대한 복지": "저소득층 등 취약계층에 대한 복지 만족도",
+        },
+        "value_normalize": {
+            "전혀 그렇지  않다": "전혀 그렇지 않다", "전혀 그렇지 않다": "전혀 그렇지 않다",
+            "그렇지 않은 편이다": "그렇지 않은 편이다", "보통이다": "보통이다",
+            "그런편이다": "그런 편이다", "그런 편이다": "그런 편이다",
+            "매우그렇다": "매우그렇다", "잘모르겠다": "잘모르겠다",
+        },
+    },
+    "임신·출산·육아": {
+        "mode": "c2_c3",
+        "c1_all_only": True,
+        "c2_to_col": {
+            "임신·출산·육아에 대한 복지": "임신·출산·육아에 대한 복지 만족도",
+            "저소득층 등 취약계층에 대한 복지": "저소득층 등 취약계층에 대한 복지 만족도",
+        },
+        "value_normalize": {
+            "전혀 그렇지  않다": "전혀 그렇지 않다", "전혀 그렇지 않다": "전혀 그렇지 않다",
+            "그렇지 않은 편이다": "그렇지 않은 편이다", "보통이다": "보통이다",
+            "그런편이다": "그런 편이다", "그런 편이다": "그런 편이다",
+            "매우그렇다": "매우그렇다", "잘모르겠다": "잘모르겠다",
+        },
+    },
+    "저소득층 등 취약계층": {
+        "mode": "c2_c3",
+        "c1_all_only": True,
+        "c2_to_col": {
+            "임신·출산·육아에 대한 복지": "임신·출산·육아에 대한 복지 만족도",
+            "저소득층 등 취약계층에 대한 복지": "저소득층 등 취약계층에 대한 복지 만족도",
         },
         "value_normalize": {
             "전혀 그렇지  않다": "전혀 그렇지 않다", "전혀 그렇지 않다": "전혀 그렇지 않다",
@@ -2783,6 +2822,18 @@ PRESET_STAT_CONFIG: Dict[str, Dict[str, Any]] = {
         },
     },
     "도정만족도": {
+        "mode": "c2_c3",
+        "c1_all_only": True,
+        "c2_to_col": {
+            "도정정책 만족도": "도정정책 만족도",
+            "행정서비스 만족도": "행정서비스 만족도",
+        },
+        "value_normalize": {
+            "매우 불만족": "매우 불만족", "비교적 불만족": "비교적 불만족", "보통": "보통",
+            "비교적 만족": "비교적 만족", "매우 만족": "매우 만족",
+        },
+    },
+    "도정정책": {
         "mode": "c2_c3",
         "c1_all_only": True,
         "c2_to_col": {
@@ -2818,7 +2869,9 @@ PRESET_STAT_CONFIG: Dict[str, Dict[str, Any]] = {
         "mode": "c2_c3",
         "c1_all_only": True,
         "c2_to_col": {
-            "동네": "동네", "시군": "시군", "경상북도": "경상북도",
+            "동네": "동네 소속감",
+            "시군": "시군 소속감",
+            "경상북도": "경상북도 소속감",
         },
         "value_normalize": {
             "전혀 소속감이 없다": "전혀 소속감이 없다", "별로 소속감이 없다": "별로 소속감이 없다",
@@ -2829,15 +2882,15 @@ PRESET_STAT_CONFIG: Dict[str, Dict[str, Any]] = {
         "mode": "c2_c3",
         "c1_all_only": True,
         "c2_to_col": {
-            "어둡고 후미진 곳이 많다": "어둡고 후미진 곳이 많다",
-            "주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다": "주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다",
-            "주변에 방치된 차나 빈 건물이 많다": "주변에 방치된 차나 빈 건물이 많다",
-            "무리 지어 다니는 불량 청소년이 많다": "무리 지어 다니는 불량 청소년이 많다",
-            "기초질서(무단횡단, 불법 주정차 등)를 지키지 않는 사람이 많다": "기초질서(무단횡단, 불법 주정차 등)를 지키지 않는 사람이 많다",
-            "큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다": "큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다",
+            "어둡고 후미진 곳이 많다": "(안전환경)어둡고 후미진 곳이 많다",
+            "주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다": "(안전환경)주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다",
+            "주변에 방치된 차나 빈 건물이 많다": "(안전환경)주변에 방치된 차나 빈 건물이 많다",
+            "무리 지어 다니는 불량 청소년이 많다": "(안전환경)무리 지어 다니는 불량 청소년이 많다",
+            "기초질서(무단횡단, 불법 주정차 등)를 지키지 않는 사람이 많다": "(안전환경)기초질서를 지키지 않는 사람이 많다",
+            "큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다": "(안전환경)큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다",
         },
         "c2_fallback_map": {
-            "기초질서(무단횡단, 불법 주정차 등)를 지키지 않는 사람이 많다": ["기초질서"],
+            "(안전환경)기초질서를 지키지 않는 사람이 많다": ["기초질서"],
         },
         "value_normalize": {
             "전혀 그렇지 않다": "전혀 그렇지 않다", "그렇지 않은 편이다": "그렇지 않은 편이다",
@@ -2848,7 +2901,10 @@ PRESET_STAT_CONFIG: Dict[str, Dict[str, Any]] = {
         "mode": "c2_c3",
         "c1_all_only": True,
         "c2_to_col": {
-            "나자신": "나자신", "배우자(애인)": "배우자(애인)", "자녀": "자녀", "부모": "부모",
+            "나자신": "(일상생활 범죄피해 두려움)나자신",
+            "배우자(애인)": "(일상생활 범죄피해 두려움)배우자(애인)",
+            "자녀": "(일상생활 범죄피해 두려움)자녀",
+            "부모": "(일상생활 범죄피해 두려움)부모",
         },
         "value_normalize": {
             "전혀 두렵지 않다": "전혀 두렵지 않다", "두렵지 않은 편이다": "두렵지 않은 편이다",
@@ -2860,8 +2916,8 @@ PRESET_STAT_CONFIG: Dict[str, Dict[str, Any]] = {
         "mode": "c2_c3",
         "c1_all_only": True,
         "c2_to_col": {
-            "밤에 혼자 집에 있을 때": "밤에 혼자 집에 있을 때",
-            "밤에 혼자 지역(동네)의 골목길을 걸을때": "밤에 혼자 지역(동네)의 골목길을 걸을때",
+            "밤에 혼자 집에 있을 때": "(일상생활에서 두려움)밤에 혼자 집에 있을 때",
+            "밤에 혼자 지역(동네)의 골목길을 걸을때": "(일상생활에서 두려움)밤에 혼자 지역(동네)의 골목길을 걸을때",
         },
         "value_normalize": {
             "전혀두렵지 않다": "전혀 두렵지 않다", "전혀 두렵지 않다": "전혀 두렵지 않다",
@@ -2873,22 +2929,22 @@ PRESET_STAT_CONFIG: Dict[str, Dict[str, Any]] = {
         "mode": "c2_c3",
         "c1_all_only": True,
         "c2_to_col": {
-            "대기(미세먼지 악취 매연 오존경보)": "대기",
-            "대기": "대기",
-            "수질": "수질",
-            "토양": "토양",
-            "소음/진동": "소음/진동",
-            "소음": "소음/진동",
-            "진동": "소음/진동",
-            "녹지환경": "녹지환경",
-            "녹지": "녹지환경",
+            "대기(미세먼지 악취 매연 오존경보)": "대기환경 체감도",
+            "대기": "대기환경 체감도",
+            "수질": "수질환경 체감도",
+            "토양": "토양환경 체감도",
+            "소음/진동": "소음/진동환경 체감도",
+            "소음": "소음/진동환경 체감도",
+            "진동": "소음/진동환경 체감도",
+            "녹지환경": "녹지환경 체감도",
+            "녹지": "녹지환경 체감도",
         },
         "c2_fallback_map": {
-            "대기": ["대기"],
-            "수질": ["수질"],
-            "토양": ["토양"],
-            "소음/진동": ["소음", "진동"],
-            "녹지환경": ["녹지"],
+            "대기환경 체감도": ["대기"],
+            "수질환경 체감도": ["수질"],
+            "토양환경 체감도": ["토양"],
+            "소음/진동환경 체감도": ["소음", "진동"],
+            "녹지환경 체감도": ["녹지"],
         },
         "value_normalize": {
             "매우나쁘다": "매우나쁘다", "약간나쁘다": "약간나쁘다", "보통이다": "보통이다",
@@ -2922,7 +2978,31 @@ PRESET_STAT_CONFIG: Dict[str, Dict[str, Any]] = {
         "col0_prefix": "B01", "col1_prefix": "B02", "col2_numeric": True,
         "value_normalize": {"있다": "있다", "없다": "없다"},
     },
+    "자원봉사 활동": {
+        "mode": "c2_code_three",
+        "c1_all_only": True,
+        "col0_prefix": "B01", "col1_prefix": "B02", "col2_numeric": True,
+        "value_normalize": {"있다": "있다", "없다": "없다"},
+    },
+    "자원봉사활동": {
+        "mode": "c2_code_three",
+        "c1_all_only": True,
+        "col0_prefix": "B01", "col1_prefix": "B02", "col2_numeric": True,
+        "value_normalize": {"있다": "있다", "없다": "없다"},
+    },
     "지난1년 동안 후원금 금액": {
+        "mode": "c2_code_three",
+        "c1_all_only": True,
+        "col0_prefix": "B01", "col1_prefix": "B02", "col2_numeric": True,
+        "value_normalize": {"있다": "있다", "없다": "없다"},
+    },
+    "후원금": {
+        "mode": "c2_code_three",
+        "c1_all_only": True,
+        "col0_prefix": "B01", "col1_prefix": "B02", "col2_numeric": True,
+        "value_normalize": {"있다": "있다", "없다": "없다"},
+    },
+    "기부": {
         "mode": "c2_code_three",
         "c1_all_only": True,
         "col0_prefix": "B01", "col1_prefix": "B02", "col2_numeric": True,
