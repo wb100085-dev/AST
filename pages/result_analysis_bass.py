@@ -1,13 +1,11 @@
 """
 [시장 확산 예측]Bass 확산 모델 (Bass Diffusion Model)
+- 무거운 라이브러리(plotly, pandas, numpy, scipy)는 페이지 진입 시 지연 로딩
 """
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
 import os
-from utils.step2_records import list_step2_records, load_step2_record
+from core.ui_components import show_package_required_error, render_step2_data_selector
+
 try:
     from scipy.optimize import curve_fit
     HAS_SCIPY = True
@@ -16,81 +14,17 @@ except ImportError:
 
 def page_bass():
     """Bass 확산 모델 페이지"""
-    # scipy 확인
-    if not HAS_SCIPY:
-        st.error("""
-        ⚠️ **필수 패키지 누락**
-        
-        `scipy` 모듈이 설치되어 있지 않습니다. 다음 명령으로 설치해주세요:
-        
-        ```bash
-        pip install scipy
-        ```
-        
-        또는 가상환경이 활성화된 상태에서:
-        
-        ```bash
-        .\\venv\\Scripts\\Activate.ps1
-        pip install scipy
-        ```
-        
-        설치 후 페이지를 새로고침해주세요.
-        """)
+    if not show_package_required_error(HAS_SCIPY, "scipy", "scipy"):
         return
-    
+    import pandas as pd
+    import numpy as np
+    import plotly.graph_objects as go
+    import plotly.express as px
+
     st.title("[시장 확산 예측]Bass 확산 모델 (Bass Diffusion Model)")
     st.markdown("**Bass 확산 모델** - 신제품/서비스의 시장 확산 패턴을 예측합니다.")
-    
-    # 가상인구 데이터 불러오기 섹션
-    st.markdown("### 가상인구 데이터 불러오기")
-    records = list_step2_records()
 
-    use_real_data = False
-    real_data_df = None
-
-    if records:
-        record_options = {}
-        for r in records:
-            ts = r.get("timestamp", "")
-            sido_name = r.get("sido_name", "")
-            rows = r.get("rows", 0)
-            cols = r.get("columns_count", 0)
-            label = f"{ts} | {sido_name} | {rows}명 | {cols}개 컬럼"
-            record_options[label] = r
-        
-        use_real_data_option = st.checkbox("2차 대입 결과 데이터 사용", value=False, key="bass_use_real_data")
-        
-        if use_real_data_option:
-            selected_label = st.selectbox(
-                "2차 대입 결과에서 가상인구 데이터를 선택하세요:",
-                options=list(record_options.keys()),
-                index=0 if not st.session_state.get("bass_selected_record_label") else 
-                      (list(record_options.keys()).index(st.session_state.bass_selected_record_label) 
-                       if st.session_state.bass_selected_record_label in record_options else 0),
-                key="bass_record_select"
-            )
-            
-            if selected_label and selected_label in record_options:
-                selected_record = record_options[selected_label]
-                excel_path = selected_record.get("excel_path", "")
-                
-                if excel_path and os.path.isfile(excel_path):
-                    try:
-                        real_data_df = load_step2_record(excel_path)
-                        st.session_state.bass_population_df = real_data_df
-                        st.session_state.bass_selected_record_label = selected_label
-                        use_real_data = True
-                        st.success(f"✅ 가상인구 데이터를 불러왔습니다. (총 {len(real_data_df)}명, {len(real_data_df.columns)}개 컬럼)")
-                        
-                        with st.expander("불러온 데이터 미리보기"):
-                            st.dataframe(real_data_df.head(20), use_container_width=True, height=300)
-                    except Exception as e:
-                        st.error(f"데이터 로드 실패: {e}")
-        else:
-            st.session_state.bass_population_df = None
-            st.info("가상 데이터를 사용합니다. 2차 대입 결과를 사용하려면 위 체크박스를 선택하세요.")
-    else:
-        st.info("아직 2차 대입 결과가 없습니다. 가상인구 생성 후 2단계에서 통계를 대입하면 여기서 불러올 수 있습니다.")
+    use_real_data, real_data_df = render_step2_data_selector("bass")
 
     st.markdown("---")
     

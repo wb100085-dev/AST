@@ -93,76 +93,79 @@ def apply_common_styles():
     """, unsafe_allow_html=True)
 
 
-def render_common_input_form():
-    """공통 입력 폼 (제품 정의, 니즈, 타깃) - 좌측 패널용"""
-    # 세션 상태 초기화
+def _ensure_survey_session():
     if "definition" not in st.session_state:
         st.session_state.definition = ""
     if "needs" not in st.session_state:
         st.session_state.needs = ""
     if "target" not in st.session_state:
         st.session_state.target = ""
-    
-    # 필수 입력 1: 제품 정의
+
+
+# placeholder: 작성창 클릭 시 사라지는 예시 글 (연한 글씨)
+DEFINITION_PLACEHOLDER = "제품의 핵심 기능, 가치, 시장 내 위치 등을 상세히 작성해주세요. (예: 우리 제품은 00 시장에서 ~)"
+NEEDS_PLACEHOLDER = "이번 조사를 통해 무엇을 알고 싶으신가요? (예: 타겟 유저의 가격 저항선, 경쟁사 대비 강점 등)"
+
+
+def render_definition_block(key_suffix: str = ""):
+    """제품/서비스 정의 블록만 렌더. 글자수는 입력값 기준으로 입력창 아래에 실시간 반영. 반환: is_definition_valid"""
+    _ensure_survey_session()
     st.markdown("### 제품/서비스의 정의 <span style='color: #ef4444;'>*</span>", unsafe_allow_html=True)
-    
-    definition_length = len(st.session_state.definition)
-    is_definition_valid = definition_length >= 300
-    
-    col_def_label, col_def_count = st.columns([3, 1])
-    with col_def_count:
-        if is_definition_valid:
-            st.markdown(f"<span style='color: #10b981; font-size: 12px; font-weight: 600;'>{definition_length} / 300자 이상</span>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<span style='color: #94a3b8; font-size: 12px; font-weight: 600;'>{definition_length} / 300자 이상</span>", unsafe_allow_html=True)
-    
+    k = f"definition_input{key_suffix}"
     definition = st.text_area(
         "제품/서비스 정의",
         value=st.session_state.definition,
-        placeholder="제품의 핵심 기능, 가치, 시장 내 위치 등을 상세히 작성해주세요.",
+        placeholder=DEFINITION_PLACEHOLDER,
         height=200,
-        key="definition_input",
+        key=k,
         label_visibility="collapsed"
     )
     st.session_state.definition = definition
-    
-    st.markdown("<br>", unsafe_allow_html=True)
-    
-    # 필수 입력 2: 조사의 니즈
+    n = len(definition)
+    if n >= 300:
+        st.caption(f"**{n}** / 300자 이상 ✓")
+    else:
+        st.caption(f"**{n}** / 300자 이상")
+    return n >= 300
+
+
+def render_needs_block(key_suffix: str = ""):
+    """조사의 목적과 니즈 블록만 렌더. 글자수는 입력값 기준으로 입력창 아래에 실시간 반영. 반환: is_needs_valid"""
+    _ensure_survey_session()
     st.markdown("### 조사의 목적과 니즈 <span style='color: #ef4444;'>*</span>", unsafe_allow_html=True)
-    
-    needs_length = len(st.session_state.needs)
-    is_needs_valid = needs_length >= 300
-    
-    col_needs_label, col_needs_count = st.columns([3, 1])
-    with col_needs_count:
-        if is_needs_valid:
-            st.markdown(f"<span style='color: #10b981; font-size: 12px; font-weight: 600;'>{needs_length} / 300자 이상</span>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<span style='color: #94a3b8; font-size: 12px; font-weight: 600;'>{needs_length} / 300자 이상</span>", unsafe_allow_html=True)
-    
+    k = f"needs_input{key_suffix}"
     needs = st.text_area(
         "조사의 목적과 니즈",
         value=st.session_state.needs,
-        placeholder="이번 조사를 통해 무엇을 알고 싶으신가요? (예: 타겟 유저의 가격 저항선, 경쟁사 대비 강점 등)",
+        placeholder=NEEDS_PLACEHOLDER,
         height=200,
-        key="needs_input",
+        key=k,
         label_visibility="collapsed"
     )
     st.session_state.needs = needs
-    
+    n = len(needs)
+    if n >= 300:
+        st.caption(f"**{n}** / 300자 이상 ✓")
+    else:
+        st.caption(f"**{n}** / 300자 이상")
+    return n >= 300
+
+
+def render_common_input_form():
+    """공통 입력 폼 (제품 정의, 니즈, 타깃) - 좌측 패널용 (기존 세로 배치)"""
+    _ensure_survey_session()
+    is_definition_valid = render_definition_block("_legacy")
     st.markdown("<br>", unsafe_allow_html=True)
-    
-    # 선택 입력: 타깃
+    is_needs_valid = render_needs_block("_legacy")
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("### 타깃 (선택)")
     target = st.text_input(
         "희망 타깃",
         value=st.session_state.target,
         placeholder="특정 타깃이 있다면 적어주세요. (예: 30대 워킹맘)",
-        key="target_input"
+        key="target_input_legacy"
     )
     st.session_state.target = target
-    
     return is_definition_valid, is_needs_valid
 
 

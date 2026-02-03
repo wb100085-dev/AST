@@ -3,23 +3,20 @@ import os
 import json
 from typing import Any, Dict, Optional
 
-# 1) 키 로드: utils 파일 우선, 없으면 환경변수 폴백
+# 키 해석: gemini_key 모듈이 load_dotenv() 후 os.getenv()로 로드함
 try:
-    from utils.gemini_key import GEMINI_API_KEY as _FILE_KEY
+    from utils.gemini_key import GEMINI_API_KEY as _ENV_KEY
 except Exception:
-    _FILE_KEY = None
+    _ENV_KEY = None
 
-# 2) Streamlit Secrets 지원 (배포 환경용)
+# Streamlit Secrets 지원 (배포 환경용)
 def _get_streamlit_secret_key():
     """Streamlit Secrets에서 API 키 가져오기"""
     try:
         import streamlit as st
-        # st.secrets는 dict-like 객체
         if hasattr(st, 'secrets'):
-            # GEMINI_API_KEY 또는 secrets.GEMINI_API_KEY 형식 지원
             if 'GEMINI_API_KEY' in st.secrets:
                 return st.secrets['GEMINI_API_KEY']
-            # 또는 secrets 섹션에 있을 수 있음
             if hasattr(st.secrets, 'get') and 'secrets' in st.secrets:
                 if 'GEMINI_API_KEY' in st.secrets['secrets']:
                     return st.secrets['secrets']['GEMINI_API_KEY']
@@ -35,33 +32,33 @@ class GeminiClient:
     """
 
     def __init__(self, model: str = "gemini-2.5-flash", api_key: Optional[str] = None):
-        # api_key 우선순위: 인자 > Streamlit Secrets > utils 파일 > 환경변수
+        # api_key 우선순위: 인자 > Streamlit Secrets > .env/환경변수 (gemini_key에서 load_dotenv 후 os.getenv)
         key_source = None
         key = None
-        
+
         if api_key:
             key = api_key
             key_source = "인자로 전달됨"
         elif _get_streamlit_secret_key():
             key = _get_streamlit_secret_key()
             key_source = "Streamlit Secrets"
-        elif _FILE_KEY:
-            key = _FILE_KEY
-            key_source = "utils/gemini_key.py"
         elif os.getenv("GEMINI_API_KEY"):
             key = os.getenv("GEMINI_API_KEY")
             key_source = "환경변수 GEMINI_API_KEY"
         elif os.getenv("GOOGLE_API_KEY"):
             key = os.getenv("GOOGLE_API_KEY")
             key_source = "환경변수 GOOGLE_API_KEY"
-        
+        elif _ENV_KEY:
+            key = _ENV_KEY
+            key_source = ".env 또는 환경변수"
+
         if not key or "여기에_" in str(key):
             raise RuntimeError(
                 "Gemini API Key 미설정 상태임. "
                 "다음 중 하나를 설정해주세요:\n"
-                "1. Streamlit Secrets: st.secrets['GEMINI_API_KEY'] (배포 환경 권장)\n"
-                "2. utils/gemini_key.py의 GEMINI_API_KEY (로컬 개발용)\n"
-                "3. 환경변수 GEMINI_API_KEY 또는 GOOGLE_API_KEY"
+                "1. .env 파일: GEMINI_API_KEY=your-key (로컬, python-dotenv로 로드)\n"
+                "2. 환경변수: GEMINI_API_KEY 또는 GOOGLE_API_KEY\n"
+                "3. Streamlit Secrets: st.secrets['GEMINI_API_KEY'] (배포 환경)"
             )
         
         # API 키 출처 저장 (디버깅용)

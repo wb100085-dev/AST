@@ -1,67 +1,64 @@
 """
 심층면접 페이지 (Process 2 - FGI/IDI)
+- 가상인구 DB(페르소나·현시대 반영된 데이터)를 지역별로 불러와 테이블로 표시
 """
-# Streamlit 자동 페이지 감지 방지: 이 파일은 app.py에서 직접 호출됨
 import streamlit as st
-import pandas as pd
-import os
 from pages.common import apply_common_styles, render_common_input_form
-from utils.step2_records import list_step2_records, load_step2_record
+from core.constants import SIDO_LABEL_TO_CODE, SIDO_CODE_TO_NAME
+from core.db import get_virtual_population_db_combined_df
+from core.session_cache import get_sido_master
 
 
 def page_interview():
     """심층면접 페이지 (Process 2 - FGI/IDI)"""
     apply_common_styles()
-    
-    # 가상인구 데이터 불러오기 섹션 (페이지 최상단에 표시)
-    st.markdown("### 가상인구 데이터 불러오기")
+
+    # 지역 선택 (가상인구 DB 페이지와 동일)
+    sido_master = get_sido_master()
+    sido_options = [f"{s['sido_name']} ({s['sido_code']})" for s in sido_master]
+    selected_sido_label = st.selectbox(
+        "지역 선택",
+        options=sido_options,
+        index=sido_options.index(st.session_state.get("interview_sido_label", "경상북도 (37)"))
+        if st.session_state.get("interview_sido_label", "경상북도 (37)") in sido_options else 0,
+        key="interview_sido_select",
+    )
+    selected_sido_code = SIDO_LABEL_TO_CODE.get(selected_sido_label, "37")
+    selected_sido_name = SIDO_CODE_TO_NAME.get(selected_sido_code, "경상북도")
+    st.session_state.interview_sido_label = selected_sido_label
+
+    st.markdown("---")
+
+    # 선택 지역의 가상인구 DB 데이터 (페르소나·현시대 반영된 모든 기록 누적)
+    st.markdown("### 가상인구 DB")
     try:
-        records = list_step2_records()
+        combined_df = get_virtual_population_db_combined_df(selected_sido_code)
     except Exception as e:
-        st.error(f"2차 대입 결과 목록을 불러오는 중 오류 발생: {e}")
-        records = []
-    
-    if records:
-        record_options = {}
-        for r in records:
-            ts = r.get("timestamp", "")
-            sido_name = r.get("sido_name", "")
-            rows = r.get("rows", 0)
-            cols = r.get("columns_count", 0)
-            label = f"{ts} | {sido_name} | {rows}명 | {cols}개 컬럼"
-            record_options[label] = r
-        
-        selected_label = st.selectbox(
-            "2차 대입 결과에서 가상인구 데이터를 선택하세요:",
-            options=list(record_options.keys()),
-            index=0 if not st.session_state.get("interview_selected_record_label") else 
-                  (list(record_options.keys()).index(st.session_state.interview_selected_record_label) 
-                   if st.session_state.interview_selected_record_label in record_options else 0),
-            key="interview_record_select"
-        )
-        
-        if selected_label and selected_label in record_options:
-            selected_record = record_options[selected_label]
-            excel_path = selected_record.get("excel_path", "")
-            
-            if excel_path and os.path.isfile(excel_path):
-                try:
-                    df = load_step2_record(excel_path)
-                    st.session_state.interview_population_df = df
-                    st.session_state.interview_selected_record_label = selected_label
-                    st.success(f"✅ 가상인구 데이터를 불러왔습니다. (총 {len(df)}명, {len(df.columns)}개 컬럼)")
-                    
-                    with st.expander("불러온 데이터 미리보기"):
-                        st.dataframe(df.head(20), use_container_width=True, height=300)
-                        st.caption(f"전체 {len(df)}명 중 처음 20명 표시")
-                except Exception as e:
-                    st.error(f"데이터 로드 실패: {e}")
-            else:
-                st.warning("선택한 데이터 파일을 찾을 수 없습니다.")
+        st.error(f"가상인구 DB를 불러오는 중 오류 발생: {e}")
+        combined_df = None
+
+    if combined_df is not None and len(combined_df) > 0:
+        total_n = len(combined_df)
+        n_cols = len(combined_df.columns)
+        if "페르소나" in combined_df.columns:
+            persona_filled = combined_df["페르소나"].fillna("").astype(str).str.strip()
+            persona_count = (persona_filled != "").sum()
+        else:
+            persona_count = 0
+
+        st.caption(f"총 {total_n:,}명의 데이터 (모든 기록 누적)")
+        st.caption(f"페르소나·현시대 반영된 목록: {persona_count}명 / 전체 {total_n:,}명")
+
+        st.session_state.interview_population_df = combined_df
+        st.success(f"✅ {selected_sido_name} 가상인구 DB에서 불러왔습니다. (총 {total_n:,}명, {n_cols}개 컬럼)")
+
+        with st.expander("불러온 데이터 (클릭하여 전체 보기)", expanded=False):
+            st.dataframe(combined_df, use_container_width=True, height=400)
+            st.caption(f"전체 {total_n:,}명 데이터")
     else:
-        st.info("아직 2차 대입 결과가 없습니다. 가상인구 생성 후 2단계에서 통계를 대입하면 여기서 불러올 수 있습니다.")
+        st.info(f"{selected_sido_name} 지역에 페르소나·현시대 반영된 데이터가 없습니다. 가상인구 DB 페이지에서 2차 대입결과를 추가한 뒤 전체 학습(페르소나·현시대 반영)을 실행하면 여기서 불러올 수 있습니다.")
         st.session_state.interview_population_df = None
-    
+
     st.markdown("---")
     
     # 메인 타이틀

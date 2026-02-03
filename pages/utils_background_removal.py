@@ -35,25 +35,17 @@ def page_photo_background_removal():
             api_key = manual_api_key.strip()
             key_source = "수동 입력"
         else:
-            # 2. 환경변수에서 확인
+            # 2. .env/환경변수 (python-dotenv는 gemini_key import 시 로드됨)
             api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
             if api_key:
-                key_source = "환경변수"
-            
-            # 3. 환경변수가 없으면 파일에서 가져오기 (매번 새로 로드)
+                key_source = ".env 또는 환경변수"
             if not api_key:
                 try:
-                    import importlib
-                    import sys
-                    # 모듈 캐시에서 제거하여 새로 로드
-                    if 'utils.gemini_key' in sys.modules:
-                        del sys.modules['utils.gemini_key']
-                    from utils import gemini_key
-                    importlib.reload(gemini_key)
-                    if gemini_key.GEMINI_API_KEY and "여기에_" not in str(gemini_key.GEMINI_API_KEY):
-                        api_key = gemini_key.GEMINI_API_KEY
-                        key_source = "파일 (utils/gemini_key.py)"
-                except (ImportError, AttributeError) as e:
+                    from utils.gemini_key import GEMINI_API_KEY
+                    if GEMINI_API_KEY and "여기에_" not in str(GEMINI_API_KEY):
+                        api_key = GEMINI_API_KEY
+                        key_source = ".env 또는 환경변수"
+                except (ImportError, AttributeError):
                     pass
         
         if not api_key:
@@ -87,9 +79,8 @@ def page_photo_background_removal():
                $env:GEMINI_API_KEY="여기에_새로운_API_키_입력"
                ```
                
-               **방법 B: 파일에 저장**
-               - `utils/gemini_key.py` 파일을 열고
-               - `GEMINI_API_KEY = "여기에_새로운_API_키_입력"` 으로 수정
+               **방법 B: .env 파일에 저장**
+               - 프로젝트 루트에 `.env` 파일을 만들고 `GEMINI_API_KEY=새로운_API_키` 추가
             
             3. **애플리케이션 재시작:**
                - Streamlit 앱을 재시작하세요
@@ -104,9 +95,9 @@ def page_photo_background_removal():
                $env:GEMINI_API_KEY="여기에_API_키_입력"
                ```
             
-            2. 또는 `utils/gemini_key.py` 파일에 설정:
-               ```python
-               GEMINI_API_KEY = "여기에_API_키_입력"
+            2. 또는 프로젝트 루트에 `.env` 파일 생성 후:
+               ```
+               GEMINI_API_KEY=여기에_API_키_입력
                ```
             """)
         return
@@ -260,9 +251,8 @@ def page_photo_background_removal():
                                $env:GEMINI_API_KEY="여기에_새로운_API_키_입력"
                                ```
                                
-                               **방법 B: 파일에 저장**
-                               - `utils/gemini_key.py` 파일을 열고
-                               - `GEMINI_API_KEY = "여기에_새로운_API_키_입력"` 으로 수정
+                               **방법 B: .env 파일에 저장**
+                               - 프로젝트 루트에 `.env` 파일을 만들고 `GEMINI_API_KEY=새로운_API_키` 추가
                             
                             3. **애플리케이션 재시작:**
                                - Streamlit 앱을 재시작하세요

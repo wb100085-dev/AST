@@ -4,15 +4,12 @@ AI Social Twin - 가상인구 생성 및 조사 설계 애플리케이션
 from __future__ import annotations
 
 import os
-import sqlite3
 import traceback
 import pickle
 from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from io import BytesIO
 from datetime import datetime
 
-import pandas as pd
-import numpy as np
 import streamlit as st
 
 # 타입 검사용 (실제 로딩은 main()에서 지연 로딩)
@@ -23,56 +20,44 @@ if TYPE_CHECKING:
     from utils.gemini_client import GeminiClient
     from utils.step2_records import STEP2_RECORDS_DIR, list_step2_records, save_step2_record
 
+from core.constants import (
+    APP_TITLE,
+    DB_PATH,
+    AUTOSAVE_PATH,
+    EXPORT_SHEET_NAME,
+    EXPORT_COLUMNS,
+    STEP2_COLUMN_RENAME,
+    DEFAULT_WEIGHTS_SCORE,
+    SIDO_MASTER,
+    SIDO_CODE,
+    SIDO_NAME,
+    SIDO_LABELS,
+    SIDO_LABEL_TO_CODE,
+    SIDO_CODE_TO_NAME,
+    AXIS_KEYS,
+    AXIS_LABELS,
+)
+from core.db import (
+    db_conn,
+    db_init,
+    db_upsert_stat,
+    db_delete_stat_by_id,
+    db_update_stat_by_id,
+    db_upsert_axis_margin_stat,
+    db_upsert_template,
+    build_stats_template_xlsx_kr,
+    build_stats_export_xlsx_kr,
+    get_export_filename,
+    import_stats_from_excel_kr,
+)
+from core.session_cache import (
+    get_cached_db_list_stats,
+    get_cached_db_axis_margin_stats,
+    get_cached_db_six_axis_stat_ids,
+    invalidate_db_stats_cache,
+    invalidate_db_axis_margin_cache,
+)
 
-APP_TITLE = "AI Social Twin"
-
-# 배포(Streamlit Cloud 등)에서도 동작하도록 데이터 디렉터리는 런타임에 생성
-_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-DB_PATH = os.path.join(_DATA_DIR, "app.db")
-
-# 오토세이브 경로 (DB_PATH와 동일 기준)
-AUTOSAVE_PATH = os.path.join(_DATA_DIR, "temp_step1_autosave.pkl")
-
-EXPORT_SHEET_NAME = "통계목록"
-EXPORT_COLUMNS = ["카테고리", "통계명", "URL", "활성여부"]
-
-# 2단계 생성 결과 컬럼명 최종 표기 (내부명 → 출력명)
-STEP2_COLUMN_RENAME = {
-    "생존여부": "부모님 생존여부(한분이라도)",
-    "하는일": "하는일 만족도",
-    "임금/가구소득": "임금/가구소득 만족도",
-    "근로시간": "근로시간 만족도",
-    "근무환경": "근무환경 만족도",
-    "전반적인 만족도": "근무 여건 전반적인 만족도",
-    "자녀유무": "학생 및 미취학 자녀 유무",
-    "총학생수": "학생 및 미취학 자녀 수",
-    "소비 경험 여부": "경북 외 소비 경험 여부",
-    "임신·출산·육아에 대한 복지": "임신·출산·육아에 대한 복지 만족도",
-    "저소득층 등 취약계층에 대한 복지": "저소득층 등 취약계층에 대한 복지 만족도",
-    "동네": "동네 소속감",
-    "시군": "시군 소속감",
-    "경상북도": "경상북도 소속감",
-    "어둡고 후미진 곳이 많다": "(안전환경)어둡고 후미진 곳이 많다",
-    "주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다": "(안전환경)주변에 쓰레기가 아무렇게 버려져 있고 지저분 하다",
-    "주변에 방치된 차나 빈 건물이 많다": "(안전환경)주변에 방치된 차나 빈 건물이 많다",
-    "무리 지어 다니는 불량 청소년이 많다": "(안전환경)무리 지어 다니는 불량 청소년이 많다",
-    "기초질서(무단횡단, 불법 주정차 등)를 지키지 않는 사람이 많다": "(안전환경)기초질서를 지키지 않는 사람이 많다",
-    "큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다": "(안전환경)큰소리로 다투거나 싸우는 사람들을 자주 볼 수 있다",
-    "나자신": "(일상생활 범죄피해 두려움)나자신",
-    "배우자(애인)": "(일상생활 범죄피해 두려움)배우자(애인)",
-    "자녀": "(일상생활 범죄피해 두려움)자녀",
-    "부모": "(일상생활 범죄피해 두려움)부모",
-    "밤에 혼자 집에 있을 때": "(일상생활에서 두려움)밤에 혼자 집에 있을 때",
-    "밤에 혼자 지역(동네)의 골목길을 걸을때": "(일상생활에서 두려움)밤에 혼자 지역(동네)의 골목길을 걸을때",
-    "대기": "대기환경 체감도",
-    "수질": "수질환경 체감도",
-    "토양": "토양환경 체감도",
-    "소음/진동": "소음/진동환경 체감도",
-    "녹지환경": "녹지환경 체감도",
-    "불만족 이유": "여가활동 불만족 이유",
-    "관람 여부": "문화예술행사 관람 여부",
-    "관람 분야": "문화예술행사 관람 분야",
-}
 
 def _apply_step2_column_rename(df: pd.DataFrame) -> pd.DataFrame:
     """2단계 결과 컬럼명을 출력용으로 변경 (존재하는 컬럼만)."""
@@ -82,8 +67,6 @@ def _apply_step2_column_rename(df: pd.DataFrame) -> pd.DataFrame:
 
 def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
     """2단계 결과 개연성: 조건에 맞지 않으면 해당 셀 비움 또는 값 조정 (inplace)."""
-    import numpy as np
-    
     # 1. 소득 없음 → 소득 만족도·소비생활만족도 비움
     if "소득 여부" in df.columns:
         no_income = df["소득 여부"].astype(str).str.strip().str.lower().isin(["아니오", "없음", "없다", "0", "no", ""])
@@ -328,434 +311,6 @@ def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
             pass
 
 
-DEFAULT_WEIGHTS_SCORE = {
-    "income": 0.50,
-    "age": 0.20,
-    "education": 0.15,
-    "gender": 0.10,
-    "random": 0.05,
-}
-
-# -----------------------------
-# 0. 상수/마스터 데이터
-# -----------------------------
-SIDO_MASTER = [
-    {"sido_name": "전국", "sido_code": "00"},
-    {"sido_name": "서울특별시", "sido_code": "11"},
-    {"sido_name": "부산광역시", "sido_code": "21"},
-    {"sido_name": "대구광역시", "sido_code": "22"},
-    {"sido_name": "인천광역시", "sido_code": "23"},
-    {"sido_name": "광주광역시", "sido_code": "24"},
-    {"sido_name": "대전광역시", "sido_code": "25"},
-    {"sido_name": "울산광역시", "sido_code": "26"},
-    {"sido_name": "세종특별자치시", "sido_code": "29"},
-    {"sido_name": "경기도", "sido_code": "31"},
-    {"sido_name": "강원도", "sido_code": "32"},
-    {"sido_name": "충청북도", "sido_code": "33"},
-    {"sido_name": "충청남도", "sido_code": "34"},
-    {"sido_name": "전라북도", "sido_code": "35"},
-    {"sido_name": "전라남도", "sido_code": "36"},
-    {"sido_name": "경상북도", "sido_code": "37"},
-    {"sido_name": "경상남도", "sido_code": "38"},
-    {"sido_name": "제주특별자치도", "sido_code": "39"},
-]
-
-# SIDO 관련 딕셔너리/리스트
-SIDO_CODE = {item["sido_code"]: item["sido_name"] for item in SIDO_MASTER}
-SIDO_NAME = {item["sido_code"]: item["sido_name"] for item in SIDO_MASTER}
-SIDO_LABELS = [f"{x['sido_name']} ({x['sido_code']})" for x in SIDO_MASTER]
-SIDO_LABEL_TO_CODE = {f"{x['sido_name']} ({x['sido_code']})": x["sido_code"] for x in SIDO_MASTER}
-SIDO_CODE_TO_NAME = {x["sido_code"]: x["sido_name"] for x in SIDO_MASTER}
-
-
-# -----------------------------
-# 1. DB Layer
-# -----------------------------
-def db_conn():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def db_init():
-    conn = db_conn()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_profiles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            sido_name TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_sido_profiles_code
-        ON sido_profiles(sido_code)
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_axis_weights (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            w_sigungu REAL NOT NULL DEFAULT 1.0,
-            w_gender REAL NOT NULL DEFAULT 1.0,
-            w_age REAL NOT NULL DEFAULT 1.0,
-            w_econ REAL NOT NULL DEFAULT 1.0,
-            w_income REAL NOT NULL DEFAULT 1.0,
-            w_edu REAL NOT NULL DEFAULT 1.0,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(sido_code)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            category TEXT NOT NULL,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_stats_sido_category_name
-        ON stats(sido_code, category, name)
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_weight_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            stat_id INTEGER NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(sido_code, stat_id)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_axis_margin_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            axis_key TEXT NOT NULL,
-            stat_id INTEGER NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(sido_code, axis_key)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_templates (
-            sido_code TEXT PRIMARY KEY,
-            filename TEXT NOT NULL,
-            file_blob BLOB NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS virtual_population_db (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            sido_name TEXT NOT NULL,
-            record_timestamp TEXT NOT NULL,
-            record_excel_path TEXT NOT NULL,
-            data_json TEXT NOT NULL,
-            added_at TEXT DEFAULT (datetime('now'))
-        )
-        """
-    )
-
-    conn.commit()
-    conn.close()
-
-
-# -----------------------------
-# 2. DB Helpers: Stats
-# -----------------------------
-def db_list_stats_by_sido(sido_code: str, active_only: bool = False) -> List[Dict[str, Any]]:
-    conn = db_conn()
-    cur = conn.cursor()
-    if sido_code == "00":
-        if active_only:
-            cur.execute("SELECT * FROM stats WHERE is_active=1 ORDER BY sido_code, category, name")
-        else:
-            cur.execute("SELECT * FROM stats ORDER BY sido_code, category, name")
-    else:
-        if active_only:
-            cur.execute(
-                "SELECT * FROM stats WHERE sido_code=? AND is_active=1 ORDER BY category, name",
-                (sido_code,),
-            )
-        else:
-            cur.execute("SELECT * FROM stats WHERE sido_code=? ORDER BY category, name", (sido_code,))
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return rows
-
-
-def db_upsert_stat(sido_code: str, category: str, name: str, url: str, is_active: int = 1):
-    conn = db_conn()
-    cur = conn.cursor()
-
-    category = str(category).strip()
-    name = str(name).strip()
-    url = str(url).strip()
-    is_active = 1 if int(is_active) != 0 else 0
-
-    cur.execute(
-        """
-        INSERT INTO stats (sido_code, category, name, url, is_active)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(sido_code, category, name) DO UPDATE SET
-            url=excluded.url,
-            is_active=excluded.is_active,
-            updated_at=datetime('now')
-        """,
-        (sido_code, category, name, url, is_active),
-    )
-    conn.commit()
-    conn.close()
-
-
-def db_delete_stat_by_id(stat_id: int):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM stats WHERE id=?", (int(stat_id),))
-    conn.commit()
-    conn.close()
-
-
-def db_update_stat_by_id(stat_id: int, category: str, name: str, url: str, is_active: int):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE stats
-        SET category=?, name=?, url=?, is_active=?, updated_at=datetime('now')
-        WHERE id=?
-        """,
-        (category.strip(), name.strip(), url.strip(), int(is_active), int(stat_id)),
-    )
-    conn.commit()
-    conn.close()
-
-
-AXIS_KEYS = ["sigungu", "gender", "age", "econ", "income", "edu"]
-AXIS_LABELS = {
-    "sigungu": "시군(거주지역)",
-    "gender": "성별",
-    "age": "연령",
-    "econ": "경제활동",
-    "income": "소득",
-    "edu": "교육정도",
-}
-
-
-def db_get_axis_margin_stats(sido_code: str, axis_key: str) -> Optional[Dict[str, Any]]:
-    """특정 시도/축의 마진 통계 소스 조회"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, sido_code, axis_key, stat_id, created_at, updated_at
-        FROM sido_axis_margin_stats
-        WHERE sido_code = ? AND axis_key = ?
-        """,
-        (sido_code, axis_key),
-    )
-    row = cur.fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def db_get_six_axis_stat_ids(sido_code: str) -> set:
-    """6축 마진에 사용 중인 통계 ID 집합 (2단계에서 제외할 대상)"""
-    axis_keys = ["sigungu", "gender", "age", "econ", "income", "edu"]
-    ids = set()
-    for axis_key in axis_keys:
-        row = db_get_axis_margin_stats(sido_code, axis_key)
-        if row and row.get("stat_id"):
-            ids.add(int(row["stat_id"]))
-    return ids
-
-
-
-def db_upsert_axis_margin_stat(sido_code: str, axis_key: str, stat_id: int):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO sido_axis_margin_stats (sido_code, axis_key, stat_id)
-        VALUES (?, ?, ?)
-        ON CONFLICT(sido_code, axis_key) DO UPDATE SET
-            stat_id=excluded.stat_id,
-            updated_at=datetime('now')
-        """,
-        (sido_code, axis_key, int(stat_id)),
-    )
-    conn.commit()
-    conn.close()
-
-# -----------------------------
-# 2-1. DB Helpers: Template
-# -----------------------------
-def db_upsert_template(sido_code: str, filename: str, file_bytes: bytes):
-    """템플릿 저장/업데이트"""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO sido_templates (sido_code, filename, file_blob)
-        VALUES (?, ?, ?)
-        ON CONFLICT(sido_code) DO UPDATE SET
-            filename = excluded.filename,
-            file_blob = excluded.file_blob,
-            updated_at = datetime('now')
-        """,
-        (sido_code, filename, file_bytes),
-    )
-    conn.commit()
-    conn.close()
-
-
-def db_get_template(sido_code: str) -> Optional[Dict[str, Any]]:
-    """템플릿 조회"""
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT filename, file_blob, updated_at
-        FROM sido_templates
-        WHERE sido_code = ?
-        """,
-        (sido_code,),
-    )
-    row = cur.fetchone()
-    conn.close()
-    
-    if row:
-        return {
-            "filename": row[0],
-            "bytes": row[1],
-            "updated_at": row[2],
-        }
-    return None
-
-
-# -----------------------------
-# 3. Excel Round-trip
-# -----------------------------
-def build_stats_template_xlsx_kr() -> bytes:
-    df = pd.DataFrame(
-        [
-            {
-                "카테고리": "01. 인구·기본 인적 특성 통계항목",
-                "통계명": "시군 및 읍면동별 내·외국인 인구현황",
-                "URL": "https://kosis.kr/openapi/statisticsData.do?method=getList&apiKey=YOUR_KEY&format=json&jsonVD=Y&userStatsId=...",
-                "활성여부": 1,
-            }
-        ],
-        columns=EXPORT_COLUMNS,
-    )
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=EXPORT_SHEET_NAME)
-    return bio.getvalue()
-
-
-def build_stats_export_xlsx_kr(sido_code: str) -> bytes:
-    stats = db_list_stats_by_sido(sido_code=sido_code, active_only=False)
-    df = pd.DataFrame(stats)
-    if df.empty:
-        out_df = pd.DataFrame(columns=EXPORT_COLUMNS)
-    else:
-        out_df = pd.DataFrame(
-            {
-                "카테고리": df["category"].astype(str),
-                "통계명": df["name"].astype(str),
-                "URL": df["url"].astype(str),
-                "활성여부": df["is_active"].astype(int),
-            }
-        )
-
-    bio = BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        out_df.to_excel(writer, index=False, sheet_name=EXPORT_SHEET_NAME)
-    return bio.getvalue()
-
-
-def get_export_filename(prefix: str) -> str:
-    d = datetime.utcnow().strftime("%Y%m%d")
-    return f"{prefix}_통계목록_EXPORT_{d}.xlsx"
-
-
-def import_stats_from_excel_kr(sido_code: str, file_bytes: bytes) -> Dict[str, Any]:
-    xdf = pd.read_excel(BytesIO(file_bytes), sheet_name=EXPORT_SHEET_NAME)
-    xdf.columns = [str(c).strip() for c in xdf.columns]
-
-    required = {"카테고리", "통계명", "URL"}
-    missing = required - set(xdf.columns)
-    if missing:
-        return {"ok": False, "error": f"필수 컬럼 누락: {sorted(list(missing))} (시트명 '{EXPORT_SHEET_NAME}' 확인 필요)"}
-
-    if "활성여부" not in xdf.columns:
-        xdf["활성여부"] = 1
-    xdf["활성여부"] = xdf["활성여부"].fillna(1)
-
-    reflected, skipped, errors = 0, 0, []
-    for i, row in xdf.iterrows():
-        try:
-            category = str(row.get("카테고리", "")).strip()
-            name = str(row.get("통계명", "")).strip()
-            url = str(row.get("URL", "")).strip()
-            if not category or not name or not url:
-                skipped += 1
-                continue
-
-            act = row.get("활성여부", 1)
-            try:
-                act = int(float(act))
-            except Exception:
-                act = 1
-            act = 1 if act != 0 else 0
-
-            db_upsert_stat(sido_code, category, name, url, act)
-            reflected += 1
-        except Exception as e:
-            errors.append({"행": int(i) + 2, "오류": str(e)})
-
-    return {"ok": True, "반영건수": reflected, "스킵건수": skipped, "오류건수": len(errors), "오류상세": errors, "총행수": len(xdf)}
-
-
 # -----------------------------
 # 4. UI Utilities
 # -----------------------------
@@ -771,6 +326,8 @@ def ensure_session_state():
         st.session_state.app_started = False
     if "nav_selected" not in st.session_state:
         st.session_state.nav_selected = "가상인구 DB"
+    if "_prev_nav_selected" not in st.session_state:
+        st.session_state._prev_nav_selected = None
     if "generated_df" not in st.session_state:
         st.session_state.generated_df = None
     if "report" not in st.session_state:
@@ -872,7 +429,7 @@ def page_data_management():
 
     # 통계 목록 표시
     st.markdown("---")
-    all_stats = db_list_stats_by_sido(sido_code)
+    all_stats = get_cached_db_list_stats(sido_code)
     if not all_stats:
         st.info("등록된 통계가 없습니다.")
     else:
@@ -899,7 +456,7 @@ def page_data_management():
             ("income", "소득"),
             ("edu", "교육"),
         ]:
-            current_stat = db_get_axis_margin_stats(sido_code, axis_key)
+            current_stat = get_cached_db_axis_margin_stats(sido_code, axis_key)
             current_id = current_stat["stat_id"] if current_stat else None
 
             selected_id = st.selectbox(
@@ -912,6 +469,7 @@ def page_data_management():
 
             if selected_id and selected_id != current_id:
                 db_upsert_axis_margin_stat(sido_code, axis_key, selected_id)
+                invalidate_db_axis_margin_cache(sido_code)
                 st.success(f"{axis_label} 마진 통계 업데이트: {stat_options[selected_id]}")
                 st.rerun()
 
@@ -2142,7 +1700,7 @@ def page_generate():
 
         # 4) 통계 목표 활성화 (UI만 유지)
         st.markdown("**통계 목표 활성화**")
-        active_stats = [s for s in db_list_stats_by_sido(sido_code) if s["is_active"] == 1]
+        active_stats = [s for s in get_cached_db_list_stats(sido_code) if s["is_active"] == 1]
         if not active_stats:
             st.info("활성화된 통계가 없습니다.")
         else:
@@ -2182,9 +1740,9 @@ def page_generate():
                             axis_keys = ["sigungu", "gender", "age", "econ", "income", "edu"]
                             margins_axis = {}
                             for axis_key in axis_keys:
-                                margin_stat = db_get_axis_margin_stats(sido_code, axis_key)
+                                margin_stat = get_cached_db_axis_margin_stats(sido_code, axis_key)
                                 if margin_stat and margin_stat.get("stat_id"):
-                                    all_stats = db_list_stats_by_sido(sido_code)
+                                    all_stats = get_cached_db_list_stats(sido_code)
                                     stat_info = next((s for s in all_stats if s["id"] == margin_stat["stat_id"]), None)
                                     if stat_info:
                                         st.info(f"{axis_key} <- [{stat_info['category']}] {stat_info['name']}")
@@ -2463,9 +2021,9 @@ def page_generate():
                     st.error("먼저 1단계 가상인구를 생성해주세요.")
                 else:
                     # 활성화된 통계 목록 가져오기 (6축 마진에 쓰인 통계는 제외 — 이미 1단계에서 반영됨)
-                    all_stats = db_list_stats_by_sido(sido_code)
+                    all_stats = get_cached_db_list_stats(sido_code)
                     active_stats = [s for s in all_stats if s.get("is_active", 0) == 1]
-                    six_axis_stat_ids = db_get_six_axis_stat_ids(sido_code)
+                    six_axis_stat_ids = get_cached_db_six_axis_stat_ids(sido_code)
                     stats_for_step2 = [s for s in active_stats if s["id"] not in six_axis_stat_ids]
                     
                     if not active_stats:
@@ -3628,7 +3186,7 @@ def page_survey_form_builder():
     st.markdown("""
     <div class="survey-header">
         <h1 style="font-size: 32px; font-weight: 800; color: #0f172a; margin-bottom: 12px;">
-            새로운 조사 프로젝트 시작하기
+            새로운 시장성 조사 설계 시작하기
         </h1>
         <p style="color: #64748b; font-size: 16px; line-height: 1.6;">
             제품과 니즈를 상세히 적어주실수록, AI 가상패널이 더 정교한 인사이트를 도출합니다.
@@ -3883,13 +3441,20 @@ def _ensure_generate_modules() -> None:
 
 
 def main():
+    # 무거운 라이브러리는 실제 앱 진입 시에만 로드 (Lazy Loading)
+    global pd, np
+    import pandas as pd
+    import numpy as np
+
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     
-    # Streamlit 자동 페이지 감지로 인한 pages/ 폴더 파일 숨김 (전역 CSS)
+    # Streamlit 자동 페이지 감지로 인한 pages/ 폴더 파일 숨김 + 페이지 전환 시 잔상 방지 (전역 CSS)
     st.markdown("""
     <style>
     /* Streamlit 자동 페이지 감지 숨김 - pages/ 폴더의 파일들이 자동으로 페이지로 표시되는 것을 방지 */
     [data-testid="stSidebarNav"] { display: none !important; }
+    /* 페이지 전환 시 이전 콘텐츠 잔상(ghosting) 방지: 메인 영역 불투명도 고정 */
+    [data-testid="stAppViewContainer"] main .block-container { opacity: 1 !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -3910,10 +3475,15 @@ def main():
 
     # 현재 선택된 페이지 확인 (사이드바 렌더링 전에 확인)
     selected = st.session_state.nav_selected
-    
-    # 설문조사와 심층면접 페이지는 자체 타이틀을 사용하므로 여기서 타이틀을 표시하지 않음
-    if selected not in ["설문조사", "심층면접"]:
-        st.title(APP_TITLE)
+    if selected in ("설문조사", "심층면접", "설문조사/심층면접"):
+        st.session_state.nav_selected = "시장성 조사 설계"
+        selected = "시장성 조사 설계"
+    _prev_nav = st.session_state.get("_prev_nav_selected")
+
+    # 페이지 변경 감지: 이전 페이지와 다르면 플래그만 설정 (메인은 아래 st.empty() 컨테이너에서 통째로 교체)
+    if _prev_nav is not None and _prev_nav != selected:
+        st.session_state["_page_just_switched"] = True
+    st.session_state["_prev_nav_selected"] = selected
 
     with st.sidebar:
         st.markdown("""
@@ -3921,9 +3491,15 @@ def main():
         /* 사이드바: 내비게이션만 표시, Streamlit 기본 페이지 목록·푸터 등 숨김 */
         [data-testid="stSidebarNav"] { display: none !important; }
         [data-testid="stSidebar"] [data-testid="stMarkdown"] a[href*="streamlit"] { display: none !important; }
-        /* Streamlit 자동 페이지 감지로 인한 pages/ 폴더 파일 숨김 */
         [data-testid="stSidebarNav"] ul li a[href*="survey"] { display: none !important; }
         [data-testid="stSidebarNav"] ul li a[href*="interview"] { display: none !important; }
+        /* 사이드바 내비 버튼: primary/secondary 동일 크기 유지 (클릭 시 커지지 않음) */
+        [data-testid="stSidebar"] .stButton > button {
+            min-height: 2.25rem !important;
+            height: 2.25rem !important;
+            padding: 0.25rem 1rem !important;
+            font-size: 0.9rem !important;
+        }
         </style>
         """, unsafe_allow_html=True)
         st.markdown("## 내비게이션")
@@ -3935,25 +3511,22 @@ def main():
         if st.button("가상인구 생성", key="nav_gen", use_container_width=True, type="primary" if _nav == "가상인구 생성" else "secondary"):
             st.session_state.nav_selected = "가상인구 생성"
             st.rerun()
-        if st.button("설문조사", key="nav_survey", use_container_width=True, type="primary" if _nav == "설문조사" else "secondary"):
-            st.session_state.nav_selected = "설문조사"
-            st.rerun()
-        if st.button("심층면접", key="nav_interview", use_container_width=True, type="primary" if _nav == "심층면접" else "secondary"):
-            st.session_state.nav_selected = "심층면접"
+        if st.button("시장성 조사 설계", key="nav_survey", use_container_width=True, type="primary" if _nav == "시장성 조사 설계" else "secondary"):
+            st.session_state.nav_selected = "시장성 조사 설계"
             st.rerun()
         st.markdown("---")
         st.markdown("**Result analysis**")
-        if st.button("[선호도 분석]컨조인트 분석 (Conjoint Analysis)", key="nav_conjoint", use_container_width=True, type="primary" if _nav == "[선호도 분석]컨조인트 분석 (Conjoint Analysis)" else "secondary"):
-            st.session_state.nav_selected = "[선호도 분석]컨조인트 분석 (Conjoint Analysis)"
+        if st.button("[선호도 분석]컨조인트 분석", key="nav_conjoint", use_container_width=True, type="primary" if _nav == "[선호도 분석]컨조인트 분석" else "secondary"):
+            st.session_state.nav_selected = "[선호도 분석]컨조인트 분석"
             st.rerun()
-        if st.button("[가격 수용성]PSM (Price Sensitivity Meter)", key="nav_psm", use_container_width=True, type="primary" if _nav == "[가격 수용성]PSM (Price Sensitivity Meter)" else "secondary"):
-            st.session_state.nav_selected = "[가격 수용성]PSM (Price Sensitivity Meter)"
+        if st.button("[가격 수용성]PSM", key="nav_psm", use_container_width=True, type="primary" if _nav == "[가격 수용성]PSM" else "secondary"):
+            st.session_state.nav_selected = "[가격 수용성]PSM"
             st.rerun()
-        if st.button("[시장 확산 예측]Bass 확산 모델 (Bass Diffusion Model)", key="nav_bass", use_container_width=True, type="primary" if _nav == "[시장 확산 예측]Bass 확산 모델 (Bass Diffusion Model)" else "secondary"):
-            st.session_state.nav_selected = "[시장 확산 예측]Bass 확산 모델 (Bass Diffusion Model)"
+        if st.button("[시장 확산 예측]Bass 확산 모델", key="nav_bass", use_container_width=True, type="primary" if _nav == "[시장 확산 예측]Bass 확산 모델" else "secondary"):
+            st.session_state.nav_selected = "[시장 확산 예측]Bass 확산 모델"
             st.rerun()
-        if st.button("[가설 검증]A/B 테스트 검증 (Statistical Significance)", key="nav_statcheck", use_container_width=True, type="primary" if _nav == "[가설 검증]A/B 테스트 검증 (Statistical Significance)" else "secondary"):
-            st.session_state.nav_selected = "[가설 검증]A/B 테스트 검증 (Statistical Significance)"
+        if st.button("[가설 검증]A/B 테스트 검증", key="nav_statcheck", use_container_width=True, type="primary" if _nav == "[가설 검증]A/B 테스트 검증" else "secondary"):
+            st.session_state.nav_selected = "[가설 검증]A/B 테스트 검증"
             st.rerun()
         st.markdown("---")
         st.markdown("**Utils**")
@@ -3964,85 +3537,91 @@ def main():
             st.session_state.nav_selected = "사진 옷 변경"
             st.rerun()
 
-    if selected == "가상인구 DB":
-        from pages.virtual_population_db import page_virtual_population_db
-        page_virtual_population_db()
-    
-    elif selected == "가상인구 생성":
-        try:
-            _ensure_generate_modules()
-        except Exception as e:
-            st.error("가상인구 생성 모듈 로드 실패: " + str(e))
-            import traceback as _tb
-            st.code(_tb.format_exc())
-        else:
-            sub = st.tabs(["데이터 관리", "생성", "2차 대입 결과", "통계 대입 로그"])
-            with sub[0]:
-                page_data_management()
-            with sub[1]:
-                page_generate()
-            with sub[2]:
-                page_step2_results()
-            with sub[3]:
-                page_stat_assignment_log()
+    # 메인 영역: st.empty() 컨테이너로 감싸 페이지 전환 시 이전 레이아웃이 잔상으로 남지 않도록 완전히 새로 그리기
+    main_placeholder = st.empty()
+    with main_placeholder.container():
+        # 시장성 조사 설계 페이지는 자체 타이틀 사용
+        if selected not in ["시장성 조사 설계"]:
+            st.title(APP_TITLE)
 
-    elif selected == "생성 결과 목록":
-        from pages.results_archive import page_results_archive
-        page_results_archive()
+        if selected == "가상인구 DB":
+            from pages.virtual_population_db import page_virtual_population_db
+            page_virtual_population_db()
 
-    elif selected == "설문조사":
-        from pages.survey import page_survey
-        page_survey()
+        elif selected == "가상인구 생성":
+            try:
+                _ensure_generate_modules()
+            except Exception as e:
+                st.error("가상인구 생성 모듈 로드 실패: " + str(e))
+                import traceback as _tb
+                st.code(_tb.format_exc())
+            else:
+                sub = st.tabs(["데이터 관리", "생성", "2차 대입 결과", "통계 대입 로그"])
+                with sub[0]:
+                    page_data_management()
+                with sub[1]:
+                    page_generate()
+                with sub[2]:
+                    page_step2_results()
+                with sub[3]:
+                    page_stat_assignment_log()
 
-    elif selected == "심층면접":
-        from pages.interview import page_interview
-        page_interview()
+        elif selected == "생성 결과 목록":
+            from pages.results_archive import page_results_archive
+            page_results_archive()
 
-    elif selected == "[선호도 분석]컨조인트 분석 (Conjoint Analysis)":
-        from pages.result_analysis_conjoint import page_conjoint_analysis
-        page_conjoint_analysis()
+        elif selected == "시장성 조사 설계":
+            from pages.survey import page_survey
+            page_survey()
 
-    elif selected == "[가격 수용성]PSM (Price Sensitivity Meter)":
-        from pages.result_analysis_psm import page_psm
-        page_psm()
+        elif selected == "[선호도 분석]컨조인트 분석":
+            from pages.result_analysis_conjoint import page_conjoint_analysis
+            page_conjoint_analysis()
 
-    elif selected == "[시장 확산 예측]Bass 확산 모델 (Bass Diffusion Model)":
-        from pages.result_analysis_bass import page_bass
-        page_bass()
+        elif selected == "[가격 수용성]PSM":
+            from pages.result_analysis_psm import page_psm
+            page_psm()
 
-    elif selected == "[가설 검증]A/B 테스트 검증 (Statistical Significance)":
-        from pages.result_analysis_statcheck import page_statcheck
-        page_statcheck()
+        elif selected == "[시장 확산 예측]Bass 확산 모델":
+            from pages.result_analysis_bass import page_bass
+            page_bass()
 
-    elif selected == "사진 배경제거":
-        try:
-            from pages.utils_background_removal import page_photo_background_removal
-            page_photo_background_removal()
-        except Exception as e:
-            st.markdown("## 사진 배경제거")
-            st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_background_removal.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
-            st.caption(str(e))
+        elif selected == "[가설 검증]A/B 테스트 검증":
+            from pages.result_analysis_statcheck import page_statcheck
+            page_statcheck()
 
-    elif selected == "사진 옷 변경":
-        try:
-            from pages.utils_clothing_change import page_photo_clothing_change
-            page_photo_clothing_change()
-        except Exception as e:
-            st.markdown("## 사진 옷 변경")
-            st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_clothing_change.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
-            st.caption(str(e))
+        elif selected == "사진 배경제거":
+            try:
+                from pages.utils_background_removal import page_photo_background_removal
+                page_photo_background_removal()
+            except Exception as e:
+                st.markdown("## 사진 배경제거")
+                st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_background_removal.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
+                st.caption(str(e))
 
-    elif selected == "Conjoint Analysis":
-        st.markdown("## Conjoint Analysis Pro")
-        st.info(
-            "**Conjoint Analysis Pro**는 React 기반 프론트엔드 앱입니다. "
-            "이 기능을 사용하려면 별도의 React 개발 서버에서 실행해 주세요."
-        )
-        st.markdown("""
-        - `pages/Conjoint Analysis Pro.py` 는 React/TypeScript 소스입니다.
-        - React 앱으로 실행: 해당 프로젝트 폴더에서 `npm install` 후 `npm start` 로 실행할 수 있습니다.
-        """)
-        st.caption("콘조인트 분석 · OLS 회귀 기반 마케팅 인텔리전스 도구")
+        elif selected == "사진 옷 변경":
+            try:
+                from pages.utils_clothing_change import page_photo_clothing_change
+                page_photo_clothing_change()
+            except Exception as e:
+                st.markdown("## 사진 옷 변경")
+                st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_clothing_change.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
+                st.caption(str(e))
+
+        elif selected == "Conjoint Analysis":
+            st.markdown("## Conjoint Analysis Pro")
+            st.info(
+                "**Conjoint Analysis Pro**는 React 기반 프론트엔드 앱입니다. "
+                "이 기능을 사용하려면 별도의 React 개발 서버에서 실행해 주세요."
+            )
+            st.markdown("""
+            - `pages/Conjoint Analysis Pro.py` 는 React/TypeScript 소스입니다.
+            - React 앱으로 실행: 해당 프로젝트 폴더에서 `npm install` 후 `npm start` 로 실행할 수 있습니다.
+            """)
+            st.caption("콘조인트 분석 · OLS 회귀 기반 마케팅 인텔리전스 도구")
+
+    # 페이지 전환 직후 플래그 해제 (다음 런부터는 일반 렌더)
+    st.session_state.pop("_page_just_switched", None)
 
 
 if __name__ == "__main__":

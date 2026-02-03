@@ -3,6 +3,12 @@ Streamlit Cloud / 배포용 진입 스크립트.
 - 첫 응답을 빨리 보내서 "무한 로딩"처럼 보이지 않도록, 먼저 "로딩 중"을 띄운 뒤 앱을 불러옵니다.
 실행: streamlit run run.py
 """
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 import streamlit as st
 
 st.set_page_config(page_title="AI Social Twin", layout="wide")

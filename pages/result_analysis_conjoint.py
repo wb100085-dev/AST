@@ -1,99 +1,30 @@
 """
 [선호도 분석]컨조인트 분석 (Conjoint Analysis)
+- 무거운 라이브러리(plotly, pandas, numpy, statsmodels)는 페이지 진입 시 지연 로딩
 """
 import streamlit as st
-import pandas as pd
-import numpy as np
+import os
+from core.ui_components import show_package_required_error, render_step2_data_selector
+
 try:
-    import statsmodels.api as sm
+    import statsmodels
     HAS_STATSMODELS = True
 except ImportError:
     HAS_STATSMODELS = False
-    st.error("⚠️ `statsmodels` 모듈이 설치되어 있지 않습니다. 다음 명령으로 설치해주세요: `pip install statsmodels`")
-import plotly.express as px
-import plotly.graph_objects as go
-import itertools
-import json
-import os
-from utils.step2_records import list_step2_records, load_step2_record
 
 def page_conjoint_analysis():
     """컨조인트 분석 페이지"""
-    # statsmodels 확인
-    if not HAS_STATSMODELS:
-        st.error("""
-        ⚠️ **필수 패키지 누락**
-        
-        `statsmodels` 모듈이 설치되어 있지 않습니다. 다음 명령으로 설치해주세요:
-        
-        ```bash
-        pip install statsmodels
-        ```
-        
-        또는 가상환경이 활성화된 상태에서:
-        
-        ```bash
-        .\\venv\\Scripts\\Activate.ps1
-        pip install statsmodels
-        ```
-        
-        설치 후 페이지를 새로고침해주세요.
-        """)
+    if not show_package_required_error(HAS_STATSMODELS, "statsmodels", "statsmodels"):
         return
-    
-    # 가상인구 데이터 불러오기 섹션
-    st.markdown("### 가상인구 데이터 불러오기")
-    records = list_step2_records()
+    import pandas as pd
+    import numpy as np
+    import plotly.express as px
+    import plotly.graph_objects as go
+    import itertools
+    import json
+    import statsmodels.api as sm
 
-    use_real_data = False
-    real_data_df = None
-
-    if records:
-        record_options = {}
-        for r in records:
-            ts = r.get("timestamp", "")
-            sido_name = r.get("sido_name", "")
-            rows = r.get("rows", 0)
-            cols = r.get("columns_count", 0)
-            label = f"{ts} | {sido_name} | {rows}명 | {cols}개 컬럼"
-            record_options[label] = r
-        
-        use_real_data_option = st.checkbox("2차 대입 결과 데이터 사용", value=False, key="conjoint_use_real_data")
-        
-        if use_real_data_option:
-            selected_label = st.selectbox(
-                "2차 대입 결과에서 가상인구 데이터를 선택하세요:",
-                options=list(record_options.keys()),
-                index=0 if not st.session_state.get("conjoint_selected_record_label") else 
-                      (list(record_options.keys()).index(st.session_state.conjoint_selected_record_label) 
-                       if st.session_state.conjoint_selected_record_label in record_options else 0),
-                key="conjoint_record_select"
-            )
-            
-            if selected_label and selected_label in record_options:
-                selected_record = record_options[selected_label]
-                excel_path = selected_record.get("excel_path", "")
-                
-                if excel_path and os.path.isfile(excel_path):
-                    try:
-                        real_data_df = load_step2_record(excel_path)
-                        st.session_state.conjoint_population_df = real_data_df
-                        st.session_state.conjoint_selected_record_label = selected_label
-                        use_real_data = True
-                        st.success(f"✅ 가상인구 데이터를 불러왔습니다. (총 {len(real_data_df)}명, {len(real_data_df.columns)}개 컬럼)")
-                        
-                        with st.expander("불러온 데이터 미리보기"):
-                            st.dataframe(real_data_df.head(20), use_container_width=True, height=300)
-                            st.caption(f"전체 {len(real_data_df)}명 중 처음 20명 표시")
-                    except Exception as e:
-                        st.error(f"데이터 로드 실패: {e}")
-                else:
-                    st.warning("선택한 데이터 파일을 찾을 수 없습니다.")
-        else:
-            st.session_state.conjoint_population_df = None
-            st.info("가상 데이터를 사용합니다. 2차 대입 결과를 사용하려면 위 체크박스를 선택하세요.")
-    else:
-        st.info("아직 2차 대입 결과가 없습니다. 가상인구 생성 후 2단계에서 통계를 대입하면 여기서 불러올 수 있습니다.")
+    use_real_data, real_data_df = render_step2_data_selector("conjoint", show_preview_row_count=True)
 
     st.markdown("---")
     
