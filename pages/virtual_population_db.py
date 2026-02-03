@@ -29,12 +29,25 @@ def _cached_sido_master():
     return get_sido_master()
 
 
+def _find_koreamap_svg() -> str | None:
+    """koreamap.svg 파일 경로 반환. 프로젝트 루트 또는 cwd 기준으로 탐색."""
+    # 1) pages/virtual_population_db.py 기준 프로젝트 루트
+    _app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    p = os.path.join(_app_root, "koreamap.svg")
+    if os.path.isfile(p):
+        return p
+    # 2) Streamlit Cloud 등: 현재 작업 디렉터리
+    p = os.path.join(os.getcwd(), "koreamap.svg")
+    if os.path.isfile(p):
+        return p
+    return None
+
+
 def _render_korea_map(selected_sido_code: str):
     """koreamap.svg 기반 인터랙티브 지도. 기본 그레이, 호버 검정, 선택 붉은색. 클릭 시 쿼리로 연동."""
-    _app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    svg_path = os.path.join(_app_root, "koreamap.svg")
-    if not os.path.isfile(svg_path):
-        st.caption("지도 파일을 찾을 수 없습니다: koreamap.svg")
+    svg_path = _find_koreamap_svg()
+    if not svg_path:
+        st.caption("지도 파일을 찾을 수 없습니다: koreamap.svg (프로젝트 루트에 koreamap.svg가 있는지 확인해주세요.)")
         return
     svg_content = open(svg_path, "r", encoding="utf-8").read()
     svg_content = svg_content.replace('width="800" height="759" viewBox="0 0 800 759"', 'viewBox="0 0 800 759" preserveAspectRatio="xMidYMid meet"')
