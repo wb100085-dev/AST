@@ -289,7 +289,7 @@ def _generate_survey_questions_with_gemini(hypotheses: list[str]) -> list[dict]:
     except Exception:
         return _default_survey_questions()
     hyp_text = "\n".join([f"가설 {i+1}: {h}" for i, h in enumerate(hypotheses[:3], 1)])
-    prompt = f"""당신은 시장성 조사 설계 전문가입니다. 아래 설정된 가설 3개를 정밀하게 분석한 뒤, 다음 주의사항을 반드시 지키며 가설을 모두 검증할 수 있는 설문 문항을 체계적으로 작성해주세요.
+    prompt = f"""당신은 시장성 조사 설계 전문가입니다. 아래 설정된 가설 3개를 정밀하게 분석한 뒤, 다음 주의사항을 반드시 지키며 가설을 모두 검증할 수 있는 설문 문항을 체계적으로 작성해주세요. 반드시 15개 이상 25개 이하의 문항을 출력하세요.
 
 [주의사항 – 설문 문항 작성 시 반드시 준수]
 
@@ -323,12 +323,17 @@ def _generate_survey_questions_with_gemini(hypotheses: list[str]) -> list[dict]:
 3) 객관식은 리커트 척도 또는 명확한 선택지 4~5개, 주관식은 심층 의견이 드러나도록 한 문장으로 작성하세요.
 4) 각 문항이 최소 하나의 가설 검증에 직접 기여하도록 하세요.
 
+[문항 수 – 반드시 준수]
+- 최소 15개 이상, 최대 25개 이하로 작성하세요. 1개나 소수만 만들지 말고, 가설 검증에 필요한 문항을 15개 이상 반드시 포함하세요.
+- 예: 객관식 약 12~20개, 주관식 약 3~5개 조합으로 총 15~25개.
+
 [문항 구성]
-- 총 최대 25개: 객관식 약 20개, 주관식 약 5개. 처음에 스크리닝 문항을 포함하세요.
+- 총 15~25개: 처음에 스크리닝 문항을 포함하고, 가설별로 검증 문항을 충분히 배치하세요.
 - 객관식: 제목·질문·선택지(①~⑤)를 명확히 구분. 선택지에 '기타', '해당 없음' 등 보완 항목 포함.
 - 주관식: 제목·질문만 작성. 응답자가 자유 서술할 수 있는 형태로.
 
 [출력 형식] 아래 형식을 정확히 따르세요. 한 문항당 블록으로 구분하고, 제목에는 "문항 N" 또는 "N." 같은 번호를 붙이지 마세요.
+- 제목·질문·선택지에 스크리닝 관련 부가 설명을 넣지 마세요. (예: (➡️ H2, H3, H4 스크리닝 시 활용), (➡️ '개'를 선택하지 않은 경우, H2 스크리닝 시점부터는 '개' 양육자) 등) 순수한 제목·질문·선택지만 출력하세요.
 ---
 유형: 객관식
 제목: (문항 제목 한 줄, 번호 없이)
@@ -350,7 +355,14 @@ def _generate_survey_questions_with_gemini(hypotheses: list[str]) -> list[dict]:
         questions = _parse_survey_questions_from_text(text)
         # 최종 검토: 보기 누락·객관식 보기 없음 등 이상 여부를 Gemini로 한 번 더 확인 후 보정
         questions = _review_survey_questions_with_gemini(questions)
-        return questions
+        # 스크리닝/➡️ 등 부가 설명 제거
+        questions = _strip_survey_question_annotations(questions)
+        # 검토 후에도 15개 미만이면 기본 문항으로 보강
+        if len(questions) < 15:
+            default = _default_survey_questions()
+            for j in range(15 - len(questions)):
+                questions.append(default[j % len(default)])
+        return questions[:25]
     except Exception:
         return _default_survey_questions()
 
@@ -391,9 +403,11 @@ def _review_survey_questions_with_gemini(questions: list[dict]) -> list[dict]:
 [검토 항목]
 1. 객관식 문항에 선택지(보기)가 반드시 2개 이상 있어야 합니다. 비었거나 1개뿐이면 적절한 보기(① ② ③ …)를 추가하세요.
 2. 보기가 누락된 객관식 문항이 있으면 해당 문항의 보기를 보완하세요.
-3. 모든 객관식은 상호 배타적·포괄적 보기(예: 매우 그렇다 ~ 전혀 그렇지 않다, 또는 명확한 선택지)를 갖추세요. '기타', '해당 없음' 등이 필요하면 포함하세요.
-4. 주관식은 선택지 없이 질문만 유지하세요.
-5. 제목·질문·선택지가 명확히 구분되도록 하고, 출력 형식은 아래 "출력 형식"을 정확히 따르세요.
+3. 예/아니오·유/무 등 이분형 질문은 반드시 양쪽 보기를 모두 포함하세요. (예: "현재 반려동물을 양육하고 계십니까?" → "예"와 "아니오" 둘 다 있어야 함. "아니오"만 있거나 "예"만 있으면 누락된 쪽을 반드시 추가하세요.)
+4. 모든 객관식은 상호 배타적·포괄적 보기(예: 매우 그렇다 ~ 전혀 그렇지 않다, 또는 명확한 선택지)를 갖추세요. '기타', '해당 없음' 등이 필요하면 포함하세요.
+5. 주관식은 선택지 없이 질문만 유지하세요.
+6. 제목·질문·선택지가 명확히 구분되도록 하고, 출력 형식은 아래 "출력 형식"을 정확히 따르세요.
+7. 제목·질문·선택지에 (➡️ ...), 스크리닝 시 활용 등 부가 설명이 있으면 제거하고 순수한 문항만 출력하세요.
 
 [출력 형식] 수정이 필요한 문항만 고치고 나머지는 그대로 두되, 반드시 아래 형식으로 전체 문항을 출력하세요.
 ---
@@ -420,6 +434,24 @@ def _review_survey_questions_with_gemini(questions: list[dict]) -> list[dict]:
     except Exception:
         pass
     return questions
+
+
+def _strip_survey_question_annotations(questions: list[dict]) -> list[dict]:
+    """제목·질문·선택지에서 (➡️ ...), 스크리닝 관련 부가 설명 제거."""
+    if not questions:
+        return questions
+    # (➡️ ...) 또는 스크리닝 언급 괄호 블록 제거
+    ann = re.compile(r"\s*\(➡️[^)]*\)|\s*\([^)]*스크리닝[^)]*\)", re.IGNORECASE)
+    out = []
+    for q in questions:
+        nq = dict(q)
+        for key in ("title", "question"):
+            if nq.get(key):
+                nq[key] = ann.sub("", nq[key]).strip()
+        if nq.get("options"):
+            nq["options"] = [ann.sub("", o).strip() for o in nq["options"] if ann.sub("", o).strip()]
+        out.append(nq)
+    return out
 
 
 def _parse_survey_questions_from_text(text: str) -> list[dict]:
@@ -450,6 +482,12 @@ def _parse_survey_questions_from_text(text: str) -> list[dict]:
             questions.append(q)
     if len(questions) > 25:
         questions = questions[:25]
+    if len(questions) < 15:
+        # 15개 미만이면 기본 문항으로 보강
+        default = _default_survey_questions()
+        needed = 15 - len(questions)
+        for j in range(needed):
+            questions.append(default[j % len(default)])
     if not questions:
         return _default_survey_questions()
     return questions
@@ -465,97 +503,555 @@ def _default_survey_questions() -> list[dict]:
     ]
 
 
+def _build_respondent_profile(row: pd.Series) -> str:
+    """패널 한 행에서 페르소나·현시대 반영·통계 요약 문자열 생성."""
+    parts = []
+    persona = row.get("페르소나") or row.get("persona")
+    if pd.notna(persona) and str(persona).strip():
+        parts.append(f"페르소나: {str(persona).strip()[:400]}")
+    ref = row.get("현시대 반영")
+    if pd.notna(ref) and str(ref).strip():
+        parts.append(f"현시대 반영: {str(ref).strip()[:300]}")
+    stat_cols = ["거주지역", "성별", "연령", "경제활동", "교육정도", "월평균소득", "가상이름"]
+    stats = []
+    for c in stat_cols:
+        if c in row.index and pd.notna(row.get(c)) and str(row.get(c)).strip():
+            stats.append(f"{c}: {row.get(c)}")
+    if stats:
+        parts.append("통계: " + ", ".join(stats))
+    return "\n".join(parts) if parts else "특성 정보 없음"
+
+
+def _generate_one_respondent_answers_gemini(panel_row: pd.Series, questions: list[dict]) -> list[str] | None:
+    """한 명의 가상인구에 대해 Gemini로 설문 응답 생성. 먼저 주관식으로 입장/생각을 밝히고, 이어서 문항별 답변. 반환: [Q1답, Q2답, ...] 또는 None."""
+    try:
+        from utils.gemini_client import GeminiClient
+    except Exception:
+        return None
+    profile = _build_respondent_profile(panel_row)
+    q_lines = []
+    for i, q in enumerate(questions[:25], 1):
+        typ = q.get("type", "객관식")
+        title = q.get("title", "")
+        question = q.get("question", "")
+        opts = q.get("options") or []
+        if typ == "객관식" and opts:
+            opts_str = " / ".join([f"① {o}" for o in opts])
+            q_lines.append(f"[문항{i}] {title}\n질문: {question}\n선택지: {opts_str}")
+        else:
+            q_lines.append(f"[문항{i}] {title}\n질문: {question} (주관식, 100자 내외로 답변)")
+    prompt = f"""당신은 다음 프로필을 가진 가상 응답자입니다.
+
+{profile}
+
+위 인물이 설문에 임할 때의 입장이나 생각을 먼저 2~3문장으로 자유롭게 쓴 뒤, 아래 각 문항에 이 인물에 맞게 답하세요.
+- 객관식: 반드시 제시된 선택지 중 정확히 하나만 그대로 출력하세요.
+- 주관식: 100자 내외로 자유 서술하세요.
+
+출력 형식 (반드시 준수):
+---입장---
+(2~3문장 자유 서술)
+---답변---
+Q1: (객관식이면 선택지 텍스트 그대로, 주관식이면 100자 내외)
+Q2: (동일)
+...
+Q{min(len(questions), 25)}: (동일)
+
+[설문 문항]
+{chr(10).join(q_lines)}
+"""
+    try:
+        client = GeminiClient()
+        resp = client._client.models.generate_content(model=client._model, contents=prompt)
+        text = (resp.text or "").strip()
+        if "---답변---" in text:
+            block = text.split("---답변---", 1)[-1].strip()
+        else:
+            block = text
+        answers = []
+        for i in range(1, min(len(questions), 25) + 1):
+            prefix = f"Q{i}:"
+            if prefix in block:
+                rest = block.split(prefix, 1)[-1]
+                next_q = rest.find("\nQ") if f"\nQ" in rest else len(rest)
+                ans = rest[:next_q].strip().split("\n")[0].strip()
+                if not ans and i <= len(questions):
+                    q = questions[i - 1]
+                    if q.get("type") == "주관식":
+                        ans = "(주관식 응답)"
+                    else:
+                        opts = q.get("options") or []
+                        ans = opts[0] if opts else ""
+                answers.append(ans[:500] if ans else "")
+            else:
+                answers.append("")
+        return answers if len(answers) == min(len(questions), 25) else None
+    except Exception:
+        return None
+
+
+def _generate_survey_responses_from_panel(panel_df: pd.DataFrame, questions: list[dict], random_state: int = 42):
+    """패널(가상인구)별로 Gemini를 활용해 페르소나·현시대 반영·통계를 참고하여 설문 응답 생성. 실패 시 랜덤 폴백."""
+    import random
+    if panel_df is None or panel_df.empty or not questions:
+        return None, []
+    rng = random.Random(random_state)
+    n = len(panel_df)
+    cols = ["respondent_id"] + [f"Q{i+1}" for i in range(min(len(questions), 25))]
+    rows = []
+    records = []
+    for idx in range(n):
+        panel_row = panel_df.iloc[idx]
+        answers = _generate_one_respondent_answers_gemini(panel_row, questions)
+        if answers is None:
+            answers = []
+            for q in questions[:25]:
+                typ = q.get("type", "객관식")
+                opts = q.get("options") or []
+                if typ == "객관식" and opts:
+                    answers.append(rng.choice(opts))
+                else:
+                    answers.append("(주관식 응답)")
+        pad = len(cols) - 1 - len(answers)
+        row = [idx + 1] + list(answers)[: len(cols) - 1] + ([""] * pad if pad > 0 else [])
+        rec = {"respondent_id": idx + 1}
+        for i, a in enumerate(row[1:], 1):
+            rec[f"Q{i}"] = rec[f"문항{i}"] = a
+        rows.append(row)
+        records.append(rec)
+    response_df = pd.DataFrame(rows, columns=cols)
+    return response_df, records
+
+
+def _compute_survey_results(questions: list[dict], response_df: pd.DataFrame) -> list[dict]:
+    """문항별 응답자 수, 비율, 평균점수(리커트 1~5 가정) 집계."""
+    if response_df is None or response_df.empty or not questions:
+        return []
+    results = []
+    for i, q in enumerate(questions[:25]):
+        col = f"Q{i+1}"
+        if col not in response_df.columns:
+            continue
+        ser = response_df[col].dropna()
+        n = len(ser)
+        vc = ser.value_counts()
+        total = n or 1
+        dist = [{"선택지": k, "응답자수": int(v), "비율(%)": round(v / total * 100, 1)} for k, v in vc.items()]
+        # 평균점수: 리커트형(1~5)이면 1~5 매핑 후 평균, 아니면 NaN
+        opts = q.get("options") or []
+        if len(opts) >= 3 and n:
+            try:
+                order = list(range(1, len(opts) + 1))
+                score_map = {o: order[j] for j, o in enumerate(opts)}
+                scores = ser.map(score_map).dropna()
+                mean_score = float(scores.mean()) if len(scores) else None
+            except Exception:
+                mean_score = None
+        else:
+            mean_score = None
+        results.append({
+            "문항번호": i + 1,
+            "제목": q.get("title", ""),
+            "질문": q.get("question", ""),
+            "유형": q.get("type", "객관식"),
+            "응답자수": n,
+            "분포": dist,
+            "평균점수": mean_score,
+        })
+    return results
+
+
+def _get_open_ended_key_points(response_df: pd.DataFrame, question_num: int, question_title: str, question_text: str) -> list[dict]:
+    """주관식 문항의 응답 목록을 분석하여 요점 5가지 반환. [{"번호": 1, "요점": "..."}, ...]"""
+    if response_df is None or response_df.empty:
+        return []
+    col = f"Q{question_num}"
+    if col not in response_df.columns:
+        return []
+    texts = response_df[col].dropna().astype(str).tolist()
+    real = [t.strip() for t in texts if t.strip() and "(주관식 응답)" not in t and len(t.strip()) > 2]
+    if not real:
+        return [{"번호": i, "요점": "(수집된 응답 없음)"} for i in range(1, 6)]
+    try:
+        from utils.gemini_client import GeminiClient
+    except Exception:
+        # 폴백: 앞 5개 응답을 요점으로
+        return [{"번호": i, "요점": real[i - 1][:200]} for i in range(1, min(6, len(real) + 1))]
+    sample = "\n".join(real[:50])
+    prompt = f"""다음은 설문 문항 "{question_title}"에 대한 응답자들의 주관식 답변입니다.
+이 답변들을 분석하여 핵심 요점을 정확히 5가지로 요약해주세요. 각 요점은 한 문장으로 작성하세요.
+
+[설문 질문]
+{question_text[:300]}
+
+[응답 목록]
+{sample[:4000]}
+
+[출력 형식] 반드시 아래처럼 번호와 요점만 출력하세요.
+1. (첫 번째 요점)
+2. (두 번째 요점)
+3. (세 번째 요점)
+4. (네 번째 요점)
+5. (다섯 번째 요점)
+"""
+    try:
+        client = GeminiClient()
+        resp = client._client.models.generate_content(model=client._model, contents=prompt)
+        text = (resp.text or "").strip()
+        points = []
+        for i in range(1, 6):
+            for sep in [f"{i}.", f"{i})", f"{i}、"]:
+                if sep in text:
+                    rest = text.split(sep, 1)[-1].strip()
+                    # 다음 번호(또는 줄끝)까지가 이 요점
+                    next_idx = len(rest)
+                    for j in range(1, 6):
+                        if j == i:
+                            continue
+                        for s in [f"\n{j}.", f"\n{j})", f"\n{j}、"]:
+                            idx = rest.find(s)
+                            if idx >= 0:
+                                next_idx = min(next_idx, idx)
+                    line = rest[:next_idx].strip().split("\n")[0].strip()[:300]
+                    points.append({"번호": i, "요점": line or f"(요점 {i})"})
+                    break
+            else:
+                points.append({"번호": i, "요점": f"(요점 {i})"})
+        return points[:5]
+    except Exception:
+        return [{"번호": i, "요점": real[i - 1][:200] if i <= len(real) else "(요점 없음)"} for i in range(1, 6)]
+
+
+def _survey_overview_text(n_respondents: int, selected_sido_label: str, hypotheses: list) -> str:
+    """조사 개요: 목적·대상(표본·추출방법)·기간·분석방법론."""
+    from datetime import datetime
+    purpose = "설정된 가설 검증 및 시장성·수요 파악"
+    if hypotheses:
+        purpose = "다음 가설 검증: " + " | ".join((h or "").strip()[:60] for h in (hypotheses or [])[:3] if (h or "").strip())
+    return f"""
+**조사 목적**  
+{purpose}
+
+**조사 대상**  
+- 표본 크기: **{n_respondents}명**  
+- 추출 방법: AI 가상인구(가상 패널) DB에서 해당 지역 내 무작위 추출(난수 시드 고정)
+
+**조사 기간**  
+- 분석 기준일: {datetime.now().strftime("%Y-%m-%d")} (AI 설문 응답 생성 시점)
+
+**분석 방법론**  
+- 문항별 빈도·비율·평균점수(리커트 척도) 기술 통계  
+- 가설별 검증 및 타깃그룹 비교는 AI 분석(Gemini)으로 보완  
+- 시각화: 막대·파이 차트로 응답 분포 표시
+"""
+
+
+def _render_question_result_chart(r: dict, key_suffix: str, chart_type: str = "pie"):
+    """문항별 응답 분포를 원형(파이) 차트로 표시. 응답자 수와 비율을 함께 표기."""
+    import plotly.graph_objects as go
+    dist = r.get("분포") or []
+    if not dist:
+        return
+    total = sum(d.get("응답자수", 0) for d in dist) or 1
+    labels = [f"{d.get('선택지', '')} ({d.get('응답자수', 0)}명, {d.get('비율(%)', 0)}%)" for d in dist]
+    values = [d.get("응답자수", 0) for d in dist]
+    fig = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.4, textinfo="label+percent")])
+    fig.update_layout(height=280, margin=dict(t=20, b=20), showlegend=True, legend=dict(orientation="h"))
+    st.plotly_chart(fig, use_container_width=True, key=key_suffix)
+
+
+def _summarize_open_ended_responses(response_df: pd.DataFrame, questions: list[dict]) -> dict:
+    """주관식 문항별 핵심 응답 TOP 5(응답 내용) 반환. 그래프 없음."""
+    if response_df is None or response_df.empty or not questions:
+        return {}
+    out = {}
+    for i, q in enumerate(questions[:25]):
+        if q.get("type") != "주관식":
+            continue
+        col = f"Q{i+1}"
+        if col not in response_df.columns:
+            continue
+        texts = response_df[col].dropna().astype(str).tolist()
+        real_texts = [t.strip() for t in texts if t.strip() and "(주관식 응답)" not in t and len(t.strip()) > 2]
+        if not real_texts:
+            out[i + 1] = {"제목": q.get("title", ""), "응답목록": [], "안내": "수집된 주관식 응답이 없거나 플레이스홀더입니다. 실제 응답 수집 시 핵심 응답 TOP 5로 요약할 수 있습니다."}
+            continue
+        # 중복 제거 후 순서 유지, 최대 5개
+        seen = set()
+        top5 = []
+        for t in real_texts:
+            if t not in seen and len(top5) < 5:
+                seen.add(t)
+                top5.append(t)
+        out[i + 1] = {"제목": q.get("title", ""), "응답목록": top5, "안내": None}
+    return out
+
+
+def _generate_survey_report_analysis(hypotheses: list, questions: list[dict], results: list[dict], response_df: pd.DataFrame) -> dict:
+    """상세분석·결과 및 전략 텍스트를 Gemini로 생성."""
+    try:
+        from utils.gemini_client import GeminiClient
+    except Exception:
+        return {"상세분석": "", "결과및전략": ""}
+    results_text = []
+    for r in results[:15]:
+        results_text.append(f"문항{r['문항번호']} ({r['제목']}): 응답자수 {r['응답자수']}, 분포 {r['분포'][:5]}, 평균점수 {r.get('평균점수')}")
+    prompt = f"""당신은 시장조사 보고서 전문가입니다. 아래 정보를 바탕으로 **상세분석**과 **결과 및 전략** 두 섹션의 초안을 작성해주세요.
+
+[가설]
+{chr(10).join(f"- {h}" for h in (hypotheses or [])[:3])}
+
+[설문 문항 요약]
+{chr(10).join(q.get("title", "") + ": " + (q.get("question", "") or "")[:80] for q in (questions or [])[:10])}
+
+[설문결과 요약]
+{chr(10).join(results_text[:12])}
+
+[요청]
+1. **상세분석**: 가설별 검증 분석, 타깃그룹 비교, 구매장벽 및 기대효익 분석을 2~3문단으로 작성하세요.
+2. **결과 및 전략**: 가설별 결과, 종합 결론, 핵심 시사점, 구체적 실행방안을 2~3문단으로 작성하세요.
+각 섹션을 "## 상세분석" / "## 결과 및 전략" 제목으로 구분하고, 한국어로 작성하세요."""
+    try:
+        client = GeminiClient()
+        resp = client._client.models.generate_content(model=client._model, contents=prompt)
+        text = (resp.text or "").strip()
+        detail = ""
+        strategy = ""
+        if "## 상세분석" in text:
+            parts = text.split("## 상세분석", 1)[-1].split("## 결과 및 전략", 1)
+            detail = (parts[0].strip() or "")[:3000]
+            if len(parts) > 1:
+                strategy = (parts[1].strip() or "")[:3000]
+        else:
+            detail = text[:2000]
+        return {"상세분석": detail, "결과및전략": strategy}
+    except Exception:
+        return {"상세분석": "(분석 생성 중 오류가 발생했습니다.)", "결과및전략": ""}
+
+
+def _extract_text_from_pdf(pdf_file) -> str:
+    """PDF 파일에서 텍스트 추출 (pypdf 사용)."""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(pdf_file)
+        parts = []
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                parts.append(t)
+        return "\n".join(parts) if parts else ""
+    except Exception:
+        return ""
+
+
+def _parse_survey_pdf_with_gemini(pdf_text: str) -> list[dict]:
+    """PDF에서 추출한 텍스트를 Gemini로 분석해 설문 문항 리스트로 변환."""
+    if not (pdf_text and pdf_text.strip()):
+        return []
+    try:
+        from utils.gemini_client import GeminiClient
+    except Exception:
+        return []
+    prompt = f"""당신은 설문조사 문서 분석 전문가입니다. 아래는 설문조사 PDF에서 추출한 텍스트입니다. 
+이 텍스트에서 설문 문항(제목, 질문, 객관식/주관식, 선택지)을 모두 추출하여 아래 출력 형식으로 정리해주세요.
+- 문항 번호·불릿 등은 제거하고 제목과 질문만 남기세요.
+- 객관식은 선택지(보기)를 ① ② ③ 형식으로 구분하세요.
+- 최대 25개 문항까지 추출하세요.
+
+[출력 형식] 반드시 아래 형식으로만 출력하세요.
+---
+유형: 객관식
+제목: (문항 제목)
+질문: (질문 내용)
+선택지: ① (내용) ② (내용) ③ (내용) ...
+---
+유형: 주관식
+제목: (문항 제목)
+질문: (질문 내용)
+---
+
+[PDF 추출 텍스트]
+{pdf_text[:12000]}
+"""
+    try:
+        client = GeminiClient()
+        resp = client._client.models.generate_content(model=client._model, contents=prompt)
+        text = (resp.text or "").strip()
+        questions = _parse_survey_questions_from_text(text)
+        if questions:
+            questions = _review_survey_questions_with_gemini(questions)
+        return questions[:25] if questions else []
+    except Exception:
+        return []
+
+
 def _render_survey_subpage():
     """서브페이지: 설문조사 — 설정된 가설 + 설문 문항 생성"""
-    # 설계 선택·설문 문항으로 버튼: 사이드바 메뉴와 동일 높이 (2.25rem)
+    # 시장성 조사 설계 모든 페이지: 버튼 그림자 제거 (stButton)
     st.markdown("""
     <style>
+    .stButton > button, .stButton > button:hover { box-shadow: none !important; }
     div[data-testid="stVerticalBlock"] > div:first-child .stButton > button,
-    div[data-testid="column"]:nth-of-type(2) .stButton > button,
-    div[data-testid="column"]:nth-of-type(3) .stButton > button { min-height: 2.25rem !important; height: 2.25rem !important; padding: 0.25rem 1rem !important; font-size: 0.9rem !important; }
-    /* 왼쪽 컬럼(설정된 가설): 가설 수정·설문 문항 자동 생성 버튼 높이 = 사이드바 */
-    div[data-testid="column"]:nth-of-type(3) .stButton > button { min-height: 2.25rem !important; height: 2.25rem !important; padding: 0.25rem 1rem !important; font-size: 0.9rem !important; }
-    /* 오른쪽 컬럼(설문 문항): 수정·패널 지정 버튼 높이 = 사이드바 */
-    div[data-testid="column"]:nth-of-type(4) .stButton > button { min-height: 2.25rem !important; height: 2.25rem !important; padding: 0.25rem 1rem !important; font-size: 0.9rem !important; }
+    div[data-testid="column"]:nth-of-type(2) .stButton > button { min-height: 2.25rem !important; height: 2.25rem !important; padding: 0.25rem 1rem !important; font-size: 0.9rem !important; }
+    /* 왼쪽(가설)·오른쪽(설문 문항) 컬럼 버튼: 고정 width/height 제거, 텍스트에 맞게 자동 크기 */
+    div[data-testid="column"]:nth-of-type(3) .stButton > button,
+    div[data-testid="column"]:nth-of-type(4) .stButton > button {
+        width: auto !important; min-width: fit-content !important;
+        height: auto !important; min-height: 2.25rem !important;
+        padding: 10px 20px !important;
+        white-space: nowrap !important;
+        border-radius: 8px !important;
+        font-size: 0.9rem !important;
+    }
+    /* 설문조사 헤더: 타이틀-구분선-버튼 한 줄, Ghost 스타일, 버튼 그림자 제거·오른쪽 정렬 */
+    .survey-header-row { display: flex; align-items: center; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.5rem; margin-bottom: 0.75rem; }
+    .survey-header-title { font-size: 1.25rem; font-weight: 700; color: #0f172a; }
+    .survey-header-line { flex: 1; min-width: 16px; border-bottom: 1px solid #e2e8f0; align-self: flex-end; margin-left: 0.5rem; }
+    div[data-testid="stHorizontalBlock"]:has(.survey-header-row) > div:first-child .survey-header-row { margin-bottom: 0; }
+    div[data-testid="stHorizontalBlock"]:has(.survey-header-row) > div:nth-child(2) { border-bottom: 1px solid #e2e8f0; padding-bottom: 0.5rem; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: flex-end; margin-left: auto; }
+    div[data-testid="stHorizontalBlock"]:has(.survey-header-row) > div:nth-child(2) .stButton > button { min-height: 1.75rem !important; height: 1.75rem !important; padding: 0.2rem 0.6rem !important; font-size: 0.8rem !important; background: transparent !important; border: 1px solid #cbd5e1 !important; color: #475569 !important; box-shadow: none !important; border-radius: 0.375rem !important; }
+    div[data-testid="stHorizontalBlock"]:has(.survey-header-row) > div:nth-child(2) .stButton > button:hover { background: #f1f5f9 !important; border-color: #94a3b8 !important; }
+    /* 설문조사 페이지 전체 버튼 그림자 제거 */
+    div[data-testid="column"] .stButton > button { box-shadow: none !important; }
     </style>
     """, unsafe_allow_html=True)
-    # 상단 행: [설문조사] [← 설계 선택] [← 설문 문항으로] (AI 옵션 시) [← AI 옵션 선택으로] (진행 페이지 시)
+    # 상단 행: 타이틀 --------- [설계 선택으로] (선 위에 버튼, Ghost 스타일)
     is_ai_survey = st.session_state.get("survey_ai_flow_page") == "ai_survey"
     is_ai_conduct = st.session_state.get("survey_ai_flow_page") == "ai_survey_conduct"
     if is_ai_conduct:
-        cols = st.columns([2, 1, 1, 1])
+        cols = st.columns([8, 1])  # 설문 응답 결과: 이전페이지 오른쪽 끝
     elif is_ai_survey:
-        cols = st.columns([3, 1, 1])
+        cols = st.columns([8, 1])  # AI 옵션 선택: 이전페이지 오른쪽 끝
     else:
-        cols = st.columns([4, 1])
+        cols = st.columns([8, 1])  # 설정된 가설: 이전페이지 오른쪽 끝
     with cols[0]:
-        st.markdown("### 설문조사")
+        st.markdown("""
+        <div class="survey-header-row">
+        <span class="survey-header-title">설문조사</span>
+        <span class="survey-header-line"></span>
+        </div>
+        """, unsafe_allow_html=True)
     with cols[1]:
-        if st.button("← 설계 선택으로", key="survey_back_to_design"):
-            st.session_state.survey_design_subpage = ""
-            st.session_state.pop("survey_hypotheses", None)
-            st.session_state.pop("survey_ai_flow_page", None)
-            st.rerun()
-    idx = 2
-    if is_ai_survey or is_ai_conduct:
-        with cols[idx]:
-            if st.button("← 설문 문항으로", key="survey_back_to_questions"):
-                st.session_state.survey_ai_flow_page = ""
-                st.rerun()
-        idx += 1
-    if is_ai_conduct:
-        with cols[idx]:
-            if st.button("← AI 옵션 선택으로", key="survey_back_to_ai_options"):
+        if is_ai_conduct:
+            # 설문 응답 결과 페이지: 이전페이지 (← 설계 선택으로와 동일 Ghost 스타일)
+            if st.button("이전페이지", key="survey_back_to_ai_options", type="secondary"):
                 st.session_state.survey_ai_flow_page = "ai_survey"
                 st.rerun()
-    st.markdown("---")
+        elif is_ai_survey:
+            if st.button("이전페이지", key="survey_back_to_questions", type="secondary"):
+                st.session_state.survey_ai_flow_page = ""
+                st.rerun()
+        else:
+            if st.button("이전페이지", key="survey_back_to_design", type="secondary"):
+                st.session_state.survey_design_subpage = ""
+                st.session_state.pop("survey_hypotheses", None)
+                st.session_state.pop("survey_ai_flow_page", None)
+                st.rerun()
 
-    # 새 페이지: AI 설문 진행 — 설문 문항 + AI 설문 옵션(지역/패널/지도·요약·그래프) 함께 표시
+    # 설문 응답 결과 페이지: 6개 섹션 보고서
     if is_ai_conduct:
-        st.markdown("### AI 설문 진행 — 설문 문항 · 옵션")
-        main_left, main_right = st.columns([1, 1], gap="large")
+        st.markdown("### 설문 응답 결과")
+        questions = st.session_state.get("survey_questions", _default_survey_questions())
+        response_df = st.session_state.get("survey_response_df")
+        response_records = st.session_state.get("survey_response_records", [])
+        if not response_records and (response_df is None or response_df.empty):
+            st.warning("응답 데이터가 없습니다. **이전페이지**에서 **AI 설문 진행**을 다시 실행해 주세요.")
+        results_by_q = st.session_state.get("survey_results_by_question", [])
+        report_analysis = st.session_state.get("survey_report_analysis", {"상세분석": "", "결과및전략": ""})
+        panel_df = st.session_state.get("survey_ai_panel_df")
+        n_respondents = len(response_records) if response_records else 0
+        selected_sido_label = st.session_state.get("survey_ai_sido_label", "")
 
-        with main_left:
-            st.markdown("**설문 문항**")
-            questions = st.session_state.get("survey_questions", _default_survey_questions())
+        hypotheses = st.session_state.get("survey_hypotheses", [])[:3]
+
+        # 1. 설문지 — 조사 개요(목적·대상·기간·분석방법론) + 전체 설문 문항
+        with st.expander("**1. 설문지 — 조사 개요 및 전체 설문 문항**", expanded=True):
+            st.markdown("#### 조사 개요")
+            st.markdown(_survey_overview_text(n_respondents, selected_sido_label, hypotheses))
+            st.markdown("---")
+            st.markdown("#### 전체 설문 문항")
             for i, q in enumerate(questions[:25], 1):
                 typ = q.get("type", "객관식")
                 title = (q.get("title", "") or "").strip()
                 question = (q.get("question", "") or "").strip()
                 options = q.get("options", [])
-                title = re.sub(r"^(문항\s*\d+\s*[:\.\)]\s*|\d+[\.\)]\s*)", "", title, flags=re.IGNORECASE).strip() or title
-                nums = "①②③④⑤⑥"
-                opts_text = " / ".join([f"{nums[j] if j < len(nums) else j+1}. {o}" for j, o in enumerate(options)]) if options else ""
-                question_display = f"{question} [주관식]" if typ == "주관식" else question
-                st.markdown(f"""
-                <div style="background: #f8fafc; padding: 12px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #e2e8f0;">
-                    <strong style="color: #4f46e5;">문항 {i}: {title}</strong><br>
-                    <span style="font-size: 13px;">{question_display}</span><br>
-                    <span style="color: #64748b; font-size: 11px;">{opts_text}</span>
-                </div>
-                """, unsafe_allow_html=True)
+                opts_text = " / ".join([f"① {o}" for o in options]) if options else "(주관식)"
+                st.markdown(f"**문항 {i}** [{typ}] {title}\n\n{question}\n\n{opts_text}")
 
-        with main_right:
-            st.markdown("**AI 설문 진행 옵션**")
-            opt_inner_left, opt_inner_right = st.columns([1, 1], gap="medium")
-            with opt_inner_left:
-                selected_sido_label = st.session_state.get("survey_ai_sido_label", "경상북도 (37)")
-                panel_count = st.session_state.get("survey_ai_panel_count", 10)
-                st.metric("지역", selected_sido_label)
-                st.metric("패널 수", f"{panel_count}명")
-                try:
-                    from pages.virtual_population_db import _render_korea_map
-                    _render_korea_map(SIDO_LABEL_TO_CODE.get(selected_sido_label, "37"))
-                except Exception:
-                    st.caption("지도 로드 실패")
-            with opt_inner_right:
-                panel_df = st.session_state.get("survey_ai_panel_df")
-                if panel_df is not None and not panel_df.empty:
-                    n = len(panel_df)
-                    st.metric("불러온 가상인구", f"{n:,}명")
-                    _render_panel_summary_and_charts(panel_df, key_prefix="conduct")
+        # 2. 응답자 특성 분석 — 성별·연령·지역 등 인구통계학적 배경, 편향성 점검
+        with st.expander("**2. 응답자 특성 분석 — 성별·연령·지역 등 인구통계학적 배경**", expanded=True):
+            if panel_df is not None and not panel_df.empty:
+                st.caption("응답자의 인구통계학적 특성을 파악하여 응답의 편향성을 점검하고, 집단별 특성 해석에 활용합니다.")
+                _render_panel_summary_and_charts(panel_df, key_prefix="respondent_char")
+            else:
+                st.info("패널(응답자) 정보가 없습니다.")
+
+        # 3. 설문결과(핵심 지표) — 객관식: 표+그래프, 주관식: 응답 분석 요점 5가지 표만
+        with st.expander("**3. 설문결과 — 핵심 지표 분석(빈도·비율·평균) 및 시각화**", expanded=True):
+            for r in results_by_q:
+                st.markdown(f"**문항 {r['문항번호']}** {r['제목']}")
+                st.caption(r["질문"][:100] + ("…" if len(r["질문"]) > 100 else ""))
+                if r.get("유형") == "주관식":
+                    # 주관식: 그래프 없이 표만 — 패널 응답 분석 요점 5가지
+                    key_points = _get_open_ended_key_points(response_df, r["문항번호"], r["제목"], r["질문"])
+                    if key_points:
+                        st.dataframe(pd.DataFrame(key_points), use_container_width=True, hide_index=True)
                 else:
-                    st.info("가상인구 정보가 없습니다. AI 옵션 선택에서 다시 불러오세요.")
+                    # 객관식: 표 + 파이 차트
+                    df_dist = pd.DataFrame(r["분포"])
+                    if not df_dist.empty:
+                        tab_left, tab_right = st.columns([1, 1])
+                        with tab_left:
+                            st.dataframe(df_dist, use_container_width=True, hide_index=True)
+                        with tab_right:
+                            _render_question_result_chart(r, f"result_pie_{r['문항번호']}", chart_type="pie")
+                st.markdown("---")
+            st.markdown("#### 통계적 유의성 검토")
+            st.caption(
+                "본 조사는 AI 가상인구 패널 기반 시뮬레이션으로, 기술 통계(빈도·비율·평균)를 제시합니다. "
+                "실제 표본조사와 달리 추론 통계(χ² 검정, t검정 등)는 생략되었으며, "
+                "표본 크기가 작을 경우 통계적 유의성에 한계가 있을 수 있음을 참고하시기 바랍니다."
+            )
+
+        # 4. 상세분석
+        with st.expander("**4. 상세분석 — 가설별 검증·타깃그룹 비교·구매장벽·기대효익**", expanded=True):
+            st.markdown(report_analysis.get("상세분석") or "(상세분석 내용이 없습니다. AI 설문 진행을 다시 실행해 주세요.)")
+
+        # 5. 결론 및 시사점(결과 및 전략)
+        with st.expander("**5. 결론 및 시사점 — 가설별 결과·종합 결론·핵심 시사점·실행방안**", expanded=True):
+            st.markdown(
+                "데이터 분석 결과를 토대로 당면한 문제의 원인을 진단하고, "
+                "향후 의사결정에 반영할 구체적인 개선 방향을 제안합니다."
+            )
+            st.markdown(report_analysis.get("결과및전략") or "(결과 및 전략 내용이 없습니다.)")
+
+        # 주관식 응답 정제 — 핵심 응답 TOP 5 (그래프 없음)
+        open_ended = _summarize_open_ended_responses(response_df, questions)
+        if open_ended:
+            with st.expander("**6. 주관식 응답 — 핵심 응답 TOP 5**", expanded=False):
+                st.caption("주관식 문항별 대표 응답 내용을 최대 5개까지 표시합니다. (그래프 없음)")
+                for q_num, data in open_ended.items():
+                    st.markdown(f"**문항 {q_num}** {data['제목']}")
+                    if data.get("안내"):
+                        st.info(data["안내"])
+                    elif data.get("응답목록"):
+                        for rank, text in enumerate(data["응답목록"], 1):
+                            st.markdown(f"{rank}. {text}")
+                    st.markdown("---")
+
+        # 설문응답원본 (주관식 섹션 유무에 따라 6 또는 7번)
+        with st.expander("**6. 설문응답원본 — 응답자 전체 설문 응답 데이터**" if not open_ended else "**7. 설문응답원본 — 응답자 전체 설문 응답 데이터**", expanded=False):
+            if response_df is not None and not response_df.empty:
+                st.dataframe(response_df, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "CSV 다운로드",
+                    data=response_df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name="survey_responses.csv",
+                    mime="text/csv",
+                    key="survey_response_csv",
+                )
+            else:
+                st.info("응답 원본 데이터가 없습니다.")
         return
 
     # 페이지 내 전환: AI 설문 진행 옵션 선택 (2분할: 왼쪽 지역/패널/지도, 오른쪽 가상인구 요약+그래프+버튼)
@@ -617,6 +1113,20 @@ def _render_survey_subpage():
             st.markdown("---")
             if panel_df is not None and len(panel_df) > 0:
                 if st.button("AI 설문 진행", type="primary", use_container_width=True, key="survey_ai_conduct_btn"):
+                    questions = st.session_state.get("survey_questions", _default_survey_questions())
+                    with st.spinner("패널 설문 응답을 생성하고 있습니다…"):
+                        response_df, response_records = _generate_survey_responses_from_panel(panel_df, questions)
+                        st.session_state.survey_response_df = response_df
+                        st.session_state.survey_response_records = response_records
+                        if response_df is not None and not response_df.empty:
+                            results = _compute_survey_results(questions, response_df)
+                            st.session_state.survey_results_by_question = results
+                            hypotheses = st.session_state.get("survey_hypotheses", [])[:3]
+                            analysis = _generate_survey_report_analysis(hypotheses, questions, results, response_df)
+                            st.session_state.survey_report_analysis = analysis
+                        else:
+                            st.session_state.survey_results_by_question = []
+                            st.session_state.survey_report_analysis = {"상세분석": "", "결과및전략": ""}
                     st.session_state.survey_ai_flow_page = "ai_survey_conduct"
                     st.rerun()
             else:
@@ -720,35 +1230,68 @@ def _render_survey_subpage():
                         <p style="color: #64748b; font-size: 11px;">{opts_text}</p>
                     </div>
                     """, unsafe_allow_html=True)
-                col_edit, col_spacer, col_panel = st.columns([1, 2, 1])
+                # 수정 | 설문문항 업로드(가로 2배) | 패널 지정
+                col_edit, col_upload, col_panel, _ = st.columns([2, 4, 2, 4])
                 with col_edit:
                     if st.button("수정", key="survey_questions_edit_btn"):
                         st.session_state.survey_questions_editing = True
+                        st.rerun()
+                with col_upload:
+                    if st.button("설문문항 업로드", key="survey_pdf_upload_btn"):
+                        st.session_state.survey_show_pdf_upload = True
                         st.rerun()
                 with col_panel:
                     if st.button("패널 지정", type="primary", key="survey_ai_flow_btn"):
                         st.session_state.survey_ai_flow_page = "ai_survey"
                         st.rerun()
+                if st.session_state.get("survey_show_pdf_upload"):
+                    st.caption("설문문항 PDF를 올리면 문항으로 반영됩니다.")
+                    pdf_file = st.file_uploader("PDF 파일 선택", type=["pdf"], key="survey_pdf_upload")
+                    if pdf_file is not None:
+                        last_processed = st.session_state.get("survey_pdf_processed_name")
+                        if last_processed != pdf_file.name:
+                            with st.spinner("PDF 분석 중…"):
+                                raw_text = _extract_text_from_pdf(pdf_file)
+                                parsed = _parse_survey_pdf_with_gemini(raw_text)
+                                if parsed:
+                                    st.session_state.survey_questions = parsed[:25]
+                                    st.session_state.survey_questions_generated = True
+                                    st.session_state.survey_pdf_processed_name = pdf_file.name
+                                    st.session_state.survey_show_pdf_upload = False
+                                    st.session_state.pop("survey_questions_editing", None)
+                                    st.rerun()
+                                else:
+                                    st.session_state.survey_pdf_processed_name = pdf_file.name
+                                    st.warning("PDF에서 설문 문항을 추출하지 못했습니다.")
         else:
             st.info("왼쪽에서 **설문 문항 자동 생성**을 누르면 여기에 설문 문항이 표시됩니다.")
 
 
 def _render_interview_subpage():
     """서브페이지: 심층면접 — 인터뷰 방식(FGI/FGD/IDI) + 모더레이터 질문 가이드"""
-    # 설계 선택 버튼: 사이드바 메뉴와 동일 높이 (2.25rem)
+    # 설계 선택 버튼: 타이틀-구분선-버튼 한 줄 (설문조사와 동일 헤더 스타일)
     st.markdown("""
     <style>
-    div[data-testid="stVerticalBlock"] > div:first-child .stButton > button { min-height: 2.25rem !important; height: 2.25rem !important; padding: 0.25rem 1rem !important; font-size: 0.9rem !important; }
+    .interview-header-row { display: flex; align-items: center; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.5rem; margin-bottom: 0.75rem; }
+    .interview-header-title { font-size: 1.25rem; font-weight: 700; color: #0f172a; }
+    .interview-header-line { flex: 1; min-width: 16px; border-bottom: 1px solid #e2e8f0; align-self: flex-end; margin-left: 0.5rem; }
+    div[data-testid="stHorizontalBlock"]:has(.interview-header-row) > div:nth-child(2) { border-bottom: 1px solid #e2e8f0; padding-bottom: 0.5rem; margin-bottom: 0.75rem; display: flex; align-items: center; justify-content: flex-end; }
+    div[data-testid="stHorizontalBlock"]:has(.interview-header-row) > div:nth-child(2) .stButton > button { min-height: 1.75rem !important; height: 1.75rem !important; padding: 0.2rem 0.6rem !important; font-size: 0.8rem !important; background: transparent !important; border: 1px solid #cbd5e1 !important; color: #475569 !important; box-shadow: none !important; border-radius: 0.375rem !important; }
+    div[data-testid="stHorizontalBlock"]:has(.interview-header-row) > div:nth-child(2) .stButton > button:hover { background: #f1f5f9 !important; border-color: #94a3b8 !important; }
     </style>
     """, unsafe_allow_html=True)
     col_title, col_btn = st.columns([4, 1])
     with col_title:
-        st.markdown("### 심층면접")
+        st.markdown("""
+        <div class="interview-header-row">
+        <span class="interview-header-title">심층면접</span>
+        <span class="interview-header-line"></span>
+        </div>
+        """, unsafe_allow_html=True)
     with col_btn:
-        if st.button("← 설계 선택으로", key="interview_back_to_design"):
+        if st.button("← 설계 선택으로", key="interview_back_to_design", type="secondary"):
             st.session_state.survey_design_subpage = ""
             st.rerun()
-    st.markdown("---")
 
     st.markdown("**인터뷰 방식 선택:**")
     interview_type = st.radio(
@@ -792,6 +1335,8 @@ def _render_interview_subpage():
 def page_survey():
     """시장성 조사 설계 페이지 — 폼 + AI 제안 또는 서브페이지(설문조사/심층면접)"""
     apply_common_styles()
+    # 시장성 조사 설계 모든 페이지: 버튼 그림자 제거
+    st.markdown("""<style>.stButton > button, .stButton > button:hover { box-shadow: none !important; }</style>""", unsafe_allow_html=True)
     subpage = st.session_state.get("survey_design_subpage", "")
 
     # 서브페이지: 설문조사 → 설정된 가설 + 설문 문항 생성

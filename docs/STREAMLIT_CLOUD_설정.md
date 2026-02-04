@@ -22,15 +22,15 @@ Streamlit Cloud 대시보드에서:
 2. 빨간색 에러 메시지 확인 (ModuleNotFoundError, ImportError 등)
 3. 필요한 패키지는 `requirements.txt` 에 버전과 함께 넣어 두세요.
 
-## 3. Secrets (API 키 등) — 필수
+## 3. Secrets (API 키 등) — 필수 (인터넷 주소에서 앱 돌릴 때)
 
-- **Manage app** > **Secrets** 에서 설정
-- **GEMINI_API_KEY** 를 반드시 설정해야 AI 기능(가상인구 대화, 페르소나 생성 등)이 동작합니다.
-- 형식 예:
+- **Manage app** > **Secrets** 에서 설정해야 인터넷(Streamlit Cloud) 주소에서 AI 기능이 동작합니다.
+- **GEMINI_API_KEY** 를 반드시 설정하세요. 형식:
   ```
   GEMINI_API_KEY = "여기에_Google_AI_Studio에서_발급한_키"
   ```
-- 로컬의 `.streamlit/secrets.toml` 내용을 그대로 붙여 넣거나, 필요한 키만 추가
+- 저장하면 앱이 자동으로 재시작되며, 페르소나 생성·대화 등이 동작합니다.
+- **참고**: 로컬용 키는 `.streamlit/secrets.toml` 또는 `streamlit/secrets.toml` 에 넣으면 되며, 두 파일 모두 Git에 커밋되지 않습니다.
 
 ## 4. 여전히 안 되면
 

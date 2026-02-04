@@ -1009,11 +1009,20 @@ def draw_charts(df: pd.DataFrame, step2_columns: Optional[List[str]] = None, ste
                     st.plotly_chart(fig, use_container_width=True, key=f"chart_step2_{idx}")
 
 
+def _get_result_df():
+    """step2_df / generated_df / step1_df 중 사용할 DataFrame 반환. DataFrame은 or 연산 불가하므로 명시적 선택."""
+    for key in ("step2_df", "generated_df", "step1_df"):
+        v = st.session_state.get(key)
+        if v is not None and (not hasattr(v, "empty") or not v.empty):
+            return v
+    return None
+
+
 @st.fragment
 def _fragment_draw_charts(step2_only: bool = False):
     """그래프 탭 전용 fragment — 이 블록 내 상호작용 시 전체가 아닌 이 부분만 갱신."""
-    df = st.session_state.get("step2_df") or st.session_state.get("generated_df") or st.session_state.get("step1_df")
-    if df is None or df.empty:
+    df = _get_result_df()
+    if df is None:
         st.info("표시할 데이터가 없습니다.")
         return
     step2_cols = None
@@ -3123,19 +3132,19 @@ def page_survey_form_builder():
         outline: none;
     }
     
-    /* 버튼 스타일 */
+    /* 버튼 스타일 (그림자 제거) */
     .stButton > button {
         border-radius: 24px;
         font-weight: 800;
         font-size: 18px;
         padding: 20px 30px;
         transition: all 0.3s;
-        box-shadow: 0 10px 15px -3px rgba(79, 70, 229, 0.2);
+        box-shadow: none !important;
     }
     
     .stButton > button:hover {
         transform: translateY(-2px);
-        box-shadow: 0 20px 25px -5px rgba(79, 70, 229, 0.3);
+        box-shadow: none !important;
     }
     
     /* 카드 스타일 */
@@ -3144,7 +3153,6 @@ def page_survey_form_builder():
         border-radius: 24px;
         padding: 32px;
         border: 1px solid #e0e7ff;
-        box-shadow: 0 20px 25px -5px rgba(79, 70, 229, 0.1);
     }
     
     .survey-card-indigo {
@@ -3446,28 +3454,42 @@ def _ensure_generate_modules() -> None:
 
 
 def _run_page_vdb():
-    st.title(APP_TITLE)
-    from pages.virtual_population_db import page_virtual_population_db
-    page_virtual_population_db()
+    ph = st.session_state.get("_main_placeholder")
+    if ph is not None:
+        with ph.container():
+            st.title(APP_TITLE)
+            from pages.virtual_population_db import page_virtual_population_db
+            page_virtual_population_db()
+    else:
+        st.title(APP_TITLE)
+        from pages.virtual_population_db import page_virtual_population_db
+        page_virtual_population_db()
 
 
 def _run_page_generate():
-    st.title(APP_TITLE)
-    try:
-        _ensure_generate_modules()
-    except Exception as e:
-        st.error("가상인구 생성 모듈 로드 실패: " + str(e))
-        st.code(traceback.format_exc())
+    ph = st.session_state.get("_main_placeholder")
+    def _content():
+        st.title(APP_TITLE)
+        try:
+            _ensure_generate_modules()
+        except Exception as e:
+            st.error("가상인구 생성 모듈 로드 실패: " + str(e))
+            st.code(traceback.format_exc())
+        else:
+            gen_tabs = st.tabs(["데이터 관리", "생성", "2차 대입 결과", "통계 대입 로그"])
+            with gen_tabs[0]:
+                page_data_management()
+            with gen_tabs[1]:
+                page_generate()
+            with gen_tabs[2]:
+                page_step2_results()
+            with gen_tabs[3]:
+                page_stat_assignment_log()
+    if ph is not None:
+        with ph.container():
+            _content()
     else:
-        gen_tabs = st.tabs(["데이터 관리", "생성", "2차 대입 결과", "통계 대입 로그"])
-        with gen_tabs[0]:
-            page_data_management()
-        with gen_tabs[1]:
-            page_generate()
-        with gen_tabs[2]:
-            page_step2_results()
-        with gen_tabs[3]:
-            page_stat_assignment_log()
+        _content()
 
 
 def _run_page_survey():
@@ -3477,9 +3499,16 @@ def _run_page_survey():
 
 
 def _run_page_conjoint():
-    st.title(APP_TITLE)
-    from pages.result_analysis_conjoint import page_conjoint_analysis
-    page_conjoint_analysis()
+    ph = st.session_state.get("_main_placeholder")
+    if ph is not None:
+        with ph.container():
+            st.title(APP_TITLE)
+            from pages.result_analysis_conjoint import page_conjoint_analysis
+            page_conjoint_analysis()
+    else:
+        st.title(APP_TITLE)
+        from pages.result_analysis_conjoint import page_conjoint_analysis
+        page_conjoint_analysis()
 
 
 def _run_page_psm():
@@ -3489,37 +3518,65 @@ def _run_page_psm():
 
 
 def _run_page_bass():
-    st.title(APP_TITLE)
-    from pages.result_analysis_bass import page_bass
-    page_bass()
+    ph = st.session_state.get("_main_placeholder")
+    if ph is not None:
+        with ph.container():
+            st.title(APP_TITLE)
+            from pages.result_analysis_bass import page_bass
+            page_bass()
+    else:
+        st.title(APP_TITLE)
+        from pages.result_analysis_bass import page_bass
+        page_bass()
 
 
 def _run_page_statcheck():
-    st.title(APP_TITLE)
-    from pages.result_analysis_statcheck import page_statcheck
-    page_statcheck()
+    ph = st.session_state.get("_main_placeholder")
+    if ph is not None:
+        with ph.container():
+            st.title(APP_TITLE)
+            from pages.result_analysis_statcheck import page_statcheck
+            page_statcheck()
+    else:
+        st.title(APP_TITLE)
+        from pages.result_analysis_statcheck import page_statcheck
+        page_statcheck()
 
 
 def _run_page_bg_removal():
-    st.title(APP_TITLE)
-    try:
-        from pages.utils_background_removal import page_photo_background_removal
-        page_photo_background_removal()
-    except Exception as e:
-        st.markdown("## 사진 배경제거")
-        st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_background_removal.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
-        st.caption(str(e))
+    ph = st.session_state.get("_main_placeholder")
+    def _content():
+        st.title(APP_TITLE)
+        try:
+            from pages.utils_background_removal import page_photo_background_removal
+            page_photo_background_removal()
+        except Exception as e:
+            st.markdown("## 사진 배경제거")
+            st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_background_removal.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
+            st.caption(str(e))
+    if ph is not None:
+        with ph.container():
+            _content()
+    else:
+        _content()
 
 
 def _run_page_clothing():
-    st.title(APP_TITLE)
-    try:
-        from pages.utils_clothing_change import page_photo_clothing_change
-        page_photo_clothing_change()
-    except Exception as e:
-        st.markdown("## 사진 옷 변경")
-        st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_clothing_change.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
-        st.caption(str(e))
+    ph = st.session_state.get("_main_placeholder")
+    def _content():
+        st.title(APP_TITLE)
+        try:
+            from pages.utils_clothing_change import page_photo_clothing_change
+            page_photo_clothing_change()
+        except Exception as e:
+            st.markdown("## 사진 옷 변경")
+            st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_clothing_change.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
+            st.caption(str(e))
+    if ph is not None:
+        with ph.container():
+            _content()
+    else:
+        _content()
 
 
 def main():
@@ -3548,6 +3605,10 @@ def main():
         if st.session_state.get("db_init_error"):
             st.error("DB 초기화 실패 (배포 환경에서는 정상일 수 있음): " + st.session_state.db_init_error)
         return
+
+    # Single Container Pattern: 페이지 전환/새로고침 시 이전 콘텐츠 잔상(ghosting) 최소화
+    main_placeholder = st.empty()
+    st.session_state["_main_placeholder"] = main_placeholder
 
     # st.navigation: 페이지 전환 시 st.rerun() 없이 전환되어 깜빡임·지연 최소화
     page_vdb = st.Page(_run_page_vdb, title="가상인구 DB", default=True)
