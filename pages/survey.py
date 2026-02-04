@@ -20,6 +20,8 @@ def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
         st.info("가상인구를 불러온 후 요약과 그래프가 표시됩니다.")
         return
 
+    # AI 설문 진행 옵션 선택 페이지용 6축 그래프 높이 (기준 300의 70% = 210)
+    chart_height = 210
     k = key_prefix or "survey"
     df = panel_df
     n = len(df)
@@ -86,7 +88,7 @@ def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
             xaxis=dict(title="인구수 (명)", tickvals=tick_vals, ticktext=[str(abs(t)) for t in tick_vals], range=[-max_abs * 1.1, max_abs * 1.1]),
             yaxis=dict(title="연령 (세)"),
             barmode="overlay",
-            height=300,
+            height=chart_height,
             margin=dict(l=50, r=50, t=20, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             hovermode="closest",
@@ -101,7 +103,7 @@ def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
             max_count = vc.max()
             colors = [f"rgba(31, 119, 180, {0.3 + 0.7 * (c / max_count)})" for c in vc.values]
             fig = go.Figure(data=[go.Bar(x=vc.index, y=vc.values, marker_color=colors, text=vc.values, textposition="auto")])
-            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            fig.update_layout(height=chart_height, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
             st.plotly_chart(fig, use_container_width=True, key=f"{k}_panel_region")
         else:
             st.caption("데이터 없음")
@@ -112,7 +114,7 @@ def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
             max_count = vc.max()
             colors = [f"rgba(255, 127, 14, {0.3 + 0.7 * (c / max_count)})" for c in vc.values]
             fig = go.Figure(data=[go.Bar(x=vc.index, y=vc.values, marker_color=colors, text=vc.values, textposition="auto")])
-            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            fig.update_layout(height=chart_height, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
             st.plotly_chart(fig, use_container_width=True, key=f"{k}_panel_gender")
         else:
             st.caption("데이터 없음")
@@ -131,7 +133,7 @@ def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
             max_count = vc.max()
             colors = [f"rgba(214, 39, 40, {0.3 + 0.7 * (c / max_count)})" for c in vc.values]
             fig = go.Figure(data=[go.Bar(x=vc.index, y=vc.values, marker_color=colors, text=vc.values, textposition="auto")])
-            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            fig.update_layout(height=chart_height, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
             st.plotly_chart(fig, use_container_width=True, key=f"{k}_panel_econ")
         else:
             st.caption("데이터 없음")
@@ -144,7 +146,7 @@ def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
             max_count = vc.max()
             colors = [f"rgba(148, 103, 189, {0.3 + 0.7 * (c / max_count)})" for c in vc.values]
             fig = go.Figure(data=[go.Bar(x=vc.index, y=vc.values, marker_color=colors, text=vc.values, textposition="auto")])
-            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            fig.update_layout(height=chart_height, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
             st.plotly_chart(fig, use_container_width=True, key=f"{k}_panel_edu")
         else:
             st.caption("데이터 없음")
@@ -157,7 +159,7 @@ def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
             max_count = vc.max() if len(vc) else 1
             colors = [f"rgba(140, 86, 75, {0.3 + 0.7 * (c / max_count)})" for c in vc.values]
             fig = go.Figure(data=[go.Bar(x=vc.index, y=vc.values, marker_color=colors, text=vc.values, textposition="auto")])
-            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=80), xaxis_tickangle=-45, xaxis_title="", yaxis_title="인구수")
+            fig.update_layout(height=chart_height, margin=dict(l=0, r=0, t=30, b=80), xaxis_tickangle=-45, xaxis_title="", yaxis_title="인구수")
             st.plotly_chart(fig, use_container_width=True, key=f"{k}_panel_income")
         else:
             st.caption("데이터 없음")
@@ -353,8 +355,7 @@ def _generate_survey_questions_with_gemini(hypotheses: list[str]) -> list[dict]:
         resp = client._client.models.generate_content(model=client._model, contents=prompt)
         text = (resp.text or "").strip()
         questions = _parse_survey_questions_from_text(text)
-        # 최종 검토: 보기 누락·객관식 보기 없음 등 이상 여부를 Gemini로 한 번 더 확인 후 보정
-        questions = _review_survey_questions_with_gemini(questions)
+        # (Test 버전: 검증 단계 생략하여 속도 우선)
         # 스크리닝/➡️ 등 부가 설명 제거
         questions = _strip_survey_question_annotations(questions)
         # 검토 후에도 15개 미만이면 기본 문항으로 보강
@@ -503,8 +504,27 @@ def _default_survey_questions() -> list[dict]:
     ]
 
 
-def _build_respondent_profile(row: pd.Series) -> str:
-    """패널 한 행에서 페르소나·현시대 반영·통계 요약 문자열 생성."""
+def _build_respondent_profile(row: pd.Series, compact: bool = False) -> str:
+    """패널 한 행에서 페르소나·현시대 반영·통계 요약 문자열 생성. compact=True면 설문 속도용 짧은 한~두 줄."""
+    stat_cols = ["거주지역", "성별", "연령", "경제활동", "교육정도", "월평균소득", "가상이름"]
+    stats = []
+    for c in stat_cols:
+        if c in row.index and pd.notna(row.get(c)) and str(row.get(c)).strip():
+            stats.append(f"{c}: {row.get(c)}")
+    stats_str = ", ".join(stats) if stats else "특성 없음"
+    if compact:
+        persona = row.get("페르소나") or row.get("persona")
+        ref = row.get("현시대 반영")
+        _p = str(persona).strip() if pd.notna(persona) and str(persona).strip() else ""
+        _r = str(ref).strip() if pd.notna(ref) and str(ref).strip() else ""
+        p = (_p[:80] + "…") if len(_p) > 80 else _p
+        r = (_r[:80] + "…") if len(_r) > 80 else _r
+        parts = [f"특성: {stats_str}"]
+        if p:
+            parts.append(f"페르소나: {p}")
+        if r:
+            parts.append(f"현시대: {r}")
+        return " | ".join(parts)
     parts = []
     persona = row.get("페르소나") or row.get("persona")
     if pd.notna(persona) and str(persona).strip():
@@ -512,23 +532,18 @@ def _build_respondent_profile(row: pd.Series) -> str:
     ref = row.get("현시대 반영")
     if pd.notna(ref) and str(ref).strip():
         parts.append(f"현시대 반영: {str(ref).strip()[:300]}")
-    stat_cols = ["거주지역", "성별", "연령", "경제활동", "교육정도", "월평균소득", "가상이름"]
-    stats = []
-    for c in stat_cols:
-        if c in row.index and pd.notna(row.get(c)) and str(row.get(c)).strip():
-            stats.append(f"{c}: {row.get(c)}")
     if stats:
-        parts.append("통계: " + ", ".join(stats))
+        parts.append("통계: " + stats_str)
     return "\n".join(parts) if parts else "특성 정보 없음"
 
 
 def _generate_one_respondent_answers_gemini(panel_row: pd.Series, questions: list[dict]) -> list[str] | None:
-    """한 명의 가상인구에 대해 Gemini로 설문 응답 생성. 먼저 주관식으로 입장/생각을 밝히고, 이어서 문항별 답변. 반환: [Q1답, Q2답, ...] 또는 None."""
+    """한 명의 가상인구에 대해 Gemini로 설문 응답 생성. (Test 버전: 속도 우선) 객관식=선택지 번호만, 주관식=50자 내외."""
     try:
         from utils.gemini_client import GeminiClient
     except Exception:
         return None
-    profile = _build_respondent_profile(panel_row)
+    profile = _build_respondent_profile(panel_row, compact=True)
     q_lines = []
     for i, q in enumerate(questions[:25], 1):
         typ = q.get("type", "객관식")
@@ -536,73 +551,104 @@ def _generate_one_respondent_answers_gemini(panel_row: pd.Series, questions: lis
         question = q.get("question", "")
         opts = q.get("options") or []
         if typ == "객관식" and opts:
-            opts_str = " / ".join([f"① {o}" for o in opts])
-            q_lines.append(f"[문항{i}] {title}\n질문: {question}\n선택지: {opts_str}")
+            opts_str = " / ".join([f"{j}:{o}" for j, o in enumerate(opts, 1)])
+            q_lines.append(f"[문항{i}] {title}\n질문: {question}\n선택지(번호만 입력): {opts_str}")
         else:
-            q_lines.append(f"[문항{i}] {title}\n질문: {question} (주관식, 100자 내외로 답변)")
-    prompt = f"""당신은 다음 프로필을 가진 가상 응답자입니다.
+            q_lines.append(f"[문항{i}] {title}\n질문: {question} (주관식, 50자 내외 한 문장)")
+    nq = min(len(questions), 25)
+    prompt = f"""당신은 아래 프로필의 가상 응답자입니다. 각 문항에 이 인물에 맞게만 답하세요. 입장 서술 없이 답변만 출력하세요.
 
 {profile}
 
-위 인물이 설문에 임할 때의 입장이나 생각을 먼저 2~3문장으로 자유롭게 쓴 뒤, 아래 각 문항에 이 인물에 맞게 답하세요.
-- 객관식: 반드시 제시된 선택지 중 정확히 하나만 그대로 출력하세요.
-- 주관식: 100자 내외로 자유 서술하세요.
+[규칙]
+- 객관식: Qn: 뒤에 반드시 선택지 번호(1,2,3,...) 하나만 입력하세요. 설명 없이 숫자만.
+- 주관식: Qn: 뒤에 50자 내외 한 문장만 입력하세요.
 
-출력 형식 (반드시 준수):
----입장---
-(2~3문장 자유 서술)
----답변---
-Q1: (객관식이면 선택지 텍스트 그대로, 주관식이면 100자 내외)
+[출력 형식] 아래만 그대로 따르세요.
+Q1: (객관식이면 숫자 하나, 주관식이면 50자 내외 한 문장)
 Q2: (동일)
 ...
-Q{min(len(questions), 25)}: (동일)
+Q{nq}: (동일)
 
 [설문 문항]
 {chr(10).join(q_lines)}
 """
     try:
         client = GeminiClient()
-        resp = client._client.models.generate_content(model=client._model, contents=prompt)
+        try:
+            from google.genai import types
+            config = types.GenerateContentConfig(max_output_tokens=800, temperature=0.2)
+            resp = client._client.models.generate_content(model=client._model, contents=prompt, config=config)
+        except Exception:
+            resp = client._client.models.generate_content(model=client._model, contents=prompt)
         text = (resp.text or "").strip()
-        if "---답변---" in text:
-            block = text.split("---답변---", 1)[-1].strip()
-        else:
-            block = text
+        block = text.split("---답변---", 1)[-1].strip() if "---답변---" in text else text
         answers = []
-        for i in range(1, min(len(questions), 25) + 1):
+        for i in range(1, nq + 1):
             prefix = f"Q{i}:"
             if prefix in block:
                 rest = block.split(prefix, 1)[-1]
-                next_q = rest.find("\nQ") if f"\nQ" in rest else len(rest)
-                ans = rest[:next_q].strip().split("\n")[0].strip()
-                if not ans and i <= len(questions):
-                    q = questions[i - 1]
-                    if q.get("type") == "주관식":
-                        ans = "(주관식 응답)"
+                next_q = rest.find("\nQ") if "\nQ" in rest else len(rest)
+                raw = rest[:next_q].strip().split("\n")[0].strip()
+                if i > len(questions):
+                    answers.append(raw[:500] if raw else "")
+                    continue
+                q = questions[i - 1]
+                typ = q.get("type", "객관식")
+                opts = q.get("options") or []
+                if typ == "객관식" and opts:
+                    # 숫자만 추출하여 선택지 매핑 (1-based)
+                    num_match = re.match(r"^(\d+)", raw.replace("①", "1").replace("②", "2").replace("③", "3").replace("④", "4").replace("⑤", "5"))
+                    if num_match:
+                        k = int(num_match.group(1))
+                        if 1 <= k <= len(opts):
+                            answers.append(opts[k - 1])
+                        else:
+                            answers.append(opts[0] if opts else raw[:200])
+                    elif raw.strip() in opts:
+                        answers.append(raw.strip())
                     else:
-                        opts = q.get("options") or []
-                        ans = opts[0] if opts else ""
-                answers.append(ans[:500] if ans else "")
+                        answers.append(opts[0] if opts else (raw[:200] or ""))
+                else:
+                    answers.append((raw[:500] if raw else "(주관식 응답)"))
             else:
-                answers.append("")
-        return answers if len(answers) == min(len(questions), 25) else None
+                if i <= len(questions):
+                    q = questions[i - 1]
+                    opts = q.get("options") or []
+                    answers.append(opts[0] if q.get("type") == "객관식" and opts else "(주관식 응답)")
+                else:
+                    answers.append("")
+        return answers if len(answers) == nq else None
     except Exception:
         return None
 
 
 def _generate_survey_responses_from_panel(panel_df: pd.DataFrame, questions: list[dict], random_state: int = 42):
-    """패널(가상인구)별로 Gemini를 활용해 페르소나·현시대 반영·통계를 참고하여 설문 응답 생성. 실패 시 랜덤 폴백."""
+    """패널(가상인구)별로 Gemini를 활용해 설문 응답 생성. (속도: 병렬 호출 + 짧은 프로필) 실패 시 랜덤 폴백."""
     import random
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     if panel_df is None or panel_df.empty or not questions:
         return None, []
     rng = random.Random(random_state)
     n = len(panel_df)
     cols = ["respondent_id"] + [f"Q{i+1}" for i in range(min(len(questions), 25))]
+    max_workers = min(5, n)
+    results_by_idx = [None] * n
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_generate_one_respondent_answers_gemini, panel_df.iloc[idx], questions): idx
+            for idx in range(n)
+        }
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                results_by_idx[idx] = fut.result()
+            except Exception:
+                results_by_idx[idx] = None
     rows = []
     records = []
     for idx in range(n):
-        panel_row = panel_df.iloc[idx]
-        answers = _generate_one_respondent_answers_gemini(panel_row, questions)
+        answers = results_by_idx[idx]
         if answers is None:
             answers = []
             for q in questions[:25]:
