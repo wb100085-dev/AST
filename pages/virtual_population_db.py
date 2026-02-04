@@ -11,7 +11,7 @@ import time
 from io import BytesIO
 
 from core.constants import SIDO_LABEL_TO_CODE, SIDO_CODE_TO_NAME, SIDO_MASTER, SIDO_TOTAL_POP
-from core.db import db_conn, get_sido_vdb_stats
+from core.db import db_conn, get_sido_vdb_stats, delete_virtual_population_db_record, delete_virtual_population_db_by_sido, list_virtual_population_db_records_all, list_virtual_population_db_records, get_virtual_population_db_combined_df
 from core.session_cache import get_sido_master
 from utils.step2_records import list_step2_records
 from utils.gemini_client import GeminiClient
@@ -266,12 +266,14 @@ def page_virtual_population_db():
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
                     if st.button("초기화", type="secondary", use_container_width=True, key="vdb_reset"):
-                        conn = db_conn()
-                        cur = conn.cursor()
-                        cur.execute("DELETE FROM virtual_population_db WHERE sido_code = ?", (selected_sido_code,))
-                        conn.commit()
-                        st.session_state.vdb_selected_records = []
-                        st.success(f"{selected_sido_name} 지역의 가상인구 DB가 초기화되었습니다.")
+                        if delete_virtual_population_db_by_sido(selected_sido_code):
+                            list_virtual_population_db_records.clear()
+                            get_virtual_population_db_combined_df.clear()
+                            get_sido_vdb_stats.clear()
+                            st.session_state.vdb_selected_records = []
+                            st.success(f"{selected_sido_name} 지역의 가상인구 DB가 초기화되었습니다.")
+                        else:
+                            st.error("초기화 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
                         st.rerun()
 
                 with col_btn2:
@@ -525,6 +527,39 @@ def page_virtual_population_db():
                                 st.rerun()
                             else:
                                 st.info("추가할 새로운 기록이 없습니다. (이미 추가된 기록은 제외됩니다)")
+
+                # DB에 저장된 2차 대입결과 목록 — 삭제 기능 (선택 시도 기준, 항상 표시)
+                st.markdown("---")
+                st.markdown("**DB에 저장된 2차 대입결과 (삭제)**")
+                db_records = list_virtual_population_db_records_all(selected_sido_code)
+                if not db_records:
+                    st.caption("DB에 저장된 기록이 없습니다.")
+                else:
+                    st.caption("삭제할 기록의 [삭제] 버튼을 누르면 DB에서도 삭제됩니다.")
+                    for rec in db_records:
+                        rid = rec["id"]
+                        ts = rec.get("record_timestamp", "")
+                        path = rec.get("record_excel_path", "")
+                        path_short = os.path.basename(path) if path else "-"
+                        rows = rec.get("rows", 0)
+                        col_label, col_btn = st.columns([4, 1])
+                        with col_label:
+                            st.text(f"{ts} | {rows}명 | {path_short}")
+                        with col_btn:
+                            if st.button("삭제", key=f"vdb_del_{rid}", type="secondary"):
+                                if delete_virtual_population_db_record(rid):
+                                    try:
+                                        list_virtual_population_db_records.clear()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        get_virtual_population_db_combined_df.clear()
+                                    except Exception:
+                                        pass
+                                    st.success("해당 기록이 DB에서 삭제되었습니다.")
+                                    st.rerun()
+                                else:
+                                    st.warning("삭제에 실패했습니다.")
 
         st.markdown("---")
         # 지도 아래 2분할: 왼쪽 가상인구 대화, 오른쪽 채팅창

@@ -3,12 +3,34 @@ AI Social Twin - 공통 상수 및 마스터 데이터
 app.py에서 분리
 """
 import os
+import tempfile
 
 # 프로젝트 루트 기준 경로 (core/constants.py 기준 상위 2단계 = 프로젝트 루트)
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.join(_APP_ROOT, "data")
-DB_PATH = os.path.join(_DATA_DIR, "app.db")
-AUTOSAVE_PATH = os.path.join(_DATA_DIR, "temp_step1_autosave.pkl")
+
+
+def _writable_data_dir():
+    """쓰기 가능한 데이터 디렉터리 반환. Streamlit Cloud 등 읽기 전용 환경에서는 /tmp 사용."""
+    if os.path.exists(_DATA_DIR):
+        if os.access(_DATA_DIR, os.W_OK):
+            return _DATA_DIR
+    else:
+        try:
+            os.makedirs(_DATA_DIR, exist_ok=True)
+            if os.access(_DATA_DIR, os.W_OK):
+                return _DATA_DIR
+        except (OSError, PermissionError):
+            pass
+    # 읽기 전용(또는 생성 불가)이면 임시 디렉터리 사용
+    _fallback = os.path.join(tempfile.gettempdir(), "ast_data")
+    os.makedirs(_fallback, exist_ok=True)
+    return _fallback
+
+
+_DATA_DIR_EFFECTIVE = _writable_data_dir()
+DB_PATH = os.path.join(_DATA_DIR_EFFECTIVE, "app.db")
+AUTOSAVE_PATH = os.path.join(_DATA_DIR_EFFECTIVE, "temp_step1_autosave.pkl")
 
 APP_TITLE = "AI Social Twin"
 

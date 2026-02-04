@@ -22,9 +22,24 @@ from core.constants import (
 def db_conn():
     """세션 동안 재사용되는 DB 연결. 캐시된 연결이므로 호출부에서 close()하지 않음."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def delete_virtual_population_db_by_sido(sido_code: str) -> bool:
+    """해당 시도 가상인구 DB 전체 삭제(초기화). 쓰기용 단일 연결 사용으로 lock 완화(Streamlit Cloud 등)."""
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        try:
+            conn.execute("DELETE FROM virtual_population_db WHERE sido_code = ?", (sido_code,))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
 
 
 def db_init():
@@ -431,6 +446,42 @@ def _vpd_record_has_persona_and_contemporary(data_json: bytes | str) -> bool:
         return ((persona != "") & (cont != "")).any()
     except Exception:
         return False
+
+
+def delete_virtual_population_db_record(record_id: int) -> bool:
+    """virtual_population_db에서 id로 한 건 삭제. 성공 시 True. 삭제 후 캐시 무효화는 호출부에서 처리."""
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM virtual_population_db WHERE id = ?", (int(record_id),))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def list_virtual_population_db_records_all(sido_code: str) -> List[Dict[str, Any]]:
+    """해당 시도의 virtual_population_db 전체 목록 반환(페르소나 필터 없음). 삭제 UI용. id, record_timestamp, record_excel_path, rows."""
+    conn = db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, sido_code, sido_name, record_timestamp, record_excel_path, data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
+        (sido_code,),
+    )
+    rows = cur.fetchall()
+    out = []
+    for row in rows:
+        try:
+            df = pd.read_json(row[5], orient="records")
+            n_rows = len(df)
+        except Exception:
+            n_rows = 0
+        out.append({
+            "id": row[0],
+            "sido_code": row[1],
+            "sido_name": row[2],
+            "record_timestamp": row[3],
+            "record_excel_path": row[4] or "",
+            "rows": n_rows,
+        })
+    return out
 
 
 @st.cache_data(ttl=60, show_spinner=False)
