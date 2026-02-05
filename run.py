@@ -1,7 +1,7 @@
 """
 Streamlit Cloud / 배포용 진입 스크립트.
-- 첫 응답을 빨리 보내서 "무한 로딩"처럼 보이지 않도록, 먼저 "로딩 중"을 띄운 뒤 앱을 불러옵니다.
 실행: streamlit run run.py
+- 한 번의 요청에서 앱을 로드해, Cloud에서 두 번째 요청 타임아웃을 피합니다.
 """
 try:
     from dotenv import load_dotenv
@@ -13,14 +13,12 @@ import streamlit as st
 
 st.set_page_config(page_title="AI Social Twin", layout="wide")
 
-# 첫 방문 시 "로딩 중"만 먼저 보여주고 rerun → 다음 요청에서 무거운 app 로드 (인터넷에서 끊기지 않도록)
+# 첫 방문에만 로딩 안내 표시 (rerun 없이 같은 요청 안에서 앱 로드 → Cloud 타임아웃 완화)
 if "run_loading_started" not in st.session_state:
     st.session_state.run_loading_started = False
-
 if not st.session_state.run_loading_started:
     st.info("앱을 불러오는 중입니다… 잠시만 기다려 주세요.")
     st.session_state.run_loading_started = True
-    st.rerun()
 
 try:
     from app import main
