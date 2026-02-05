@@ -194,29 +194,46 @@ def page_virtual_population_db():
                     st.session_state["vdb_sido_select"] = label
                     break
         # 지도 클릭(Plotly on_select) 시 세션에 저장된 선택을 셀렉트박스에 반영
+        # 배포 환경(Streamlit Cloud 등)에서는 selection이 dict/camelCase로 올 수 있음
         map_state = st.session_state.get("vdb_map")
-        if map_state and getattr(map_state, "selection", None):
-            sel = map_state.selection
-            pts = getattr(sel, "points", None) or []
-            if pts:
-                p0 = pts[0]
-                p0_dict = p0 if isinstance(p0, dict) else (getattr(p0, "__dict__", None) or {})
-                cd = p0_dict.get("customdata")
-                loc_id = p0_dict.get("location")  # Choroplethmapbox는 클릭한 feature의 id(location)
-                loc_idx = p0_dict.get("point_index")
-                code = None
-                if cd and len(cd) > 0:
-                    code = str(cd[0])
-                if not code and loc_id is not None:
-                    code = str(loc_id)
-                if not code and loc_idx is not None and loc_idx < len(SIDO_MASTER):
-                    sidos_ordered = [s["sido_code"] for s in SIDO_MASTER if s["sido_code"] != "00"]
-                    if loc_idx < len(sidos_ordered):
-                        code = str(sidos_ordered[loc_idx])
-                if code:
-                    label = f"{SIDO_CODE_TO_NAME.get(code, '')} ({code})"
-                    st.session_state["vdb_sido_select"] = label
-                    st.session_state["selected_sido_label"] = label
+        sel = None
+        if map_state is not None:
+            sel = map_state.get("selection") if isinstance(map_state, dict) else getattr(map_state, "selection", None)
+        pts = []
+        if sel is not None:
+            pts = sel.get("points", []) if isinstance(sel, dict) else (getattr(sel, "points", None) or [])
+        # 일부 환경에서는 selection이 locations 리스트로만 옴
+        if not pts and isinstance(sel, dict) and "locations" in sel:
+            locs = sel.get("locations") or []
+            if locs:
+                pts = [{"location": loc} if isinstance(loc, (str, int, float)) else loc for loc in locs]
+        if not pts and isinstance(sel, (list, tuple)) and len(sel) > 0:
+            first = sel[0]
+            if isinstance(first, (str, int, float)):
+                pts = [{"location": first}]
+        if pts:
+            p0 = pts[0]
+            p0_dict = p0 if isinstance(p0, dict) else (getattr(p0, "__dict__", None) or {})
+            # customdata / customData (camelCase), location, point_index / pointIndex
+            cd = p0_dict.get("customdata") or p0_dict.get("customData")
+            loc_id = p0_dict.get("location")
+            _pi, _pj = p0_dict.get("point_index"), p0_dict.get("pointIndex")
+            loc_idx = _pi if _pi is not None else _pj
+            code = None
+            if cd and (isinstance(cd, (list, tuple)) and len(cd) > 0):
+                code = str(cd[0])
+            elif isinstance(cd, (str, int, float)):
+                code = str(cd)
+            if not code and loc_id is not None:
+                code = str(loc_id)
+            if not code and loc_idx is not None:
+                sidos_ordered = [s["sido_code"] for s in SIDO_MASTER if s["sido_code"] != "00"]
+                if 0 <= loc_idx < len(sidos_ordered):
+                    code = str(sidos_ordered[loc_idx])
+            if code:
+                label = f"{SIDO_CODE_TO_NAME.get(code, '')} ({code})"
+                st.session_state["vdb_sido_select"] = label
+                st.session_state["selected_sido_label"] = label
 
         # 시도별 통계 (가상인구 DB 수; core.db get_sido_vdb_stats 캐싱 활용)
         try:
