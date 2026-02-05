@@ -18,15 +18,39 @@ from core.db import (
     list_virtual_population_db_records_all,
     list_virtual_population_db_records,
     list_virtual_population_db_data_jsons,
+    list_virtual_population_db_metadata,
     get_virtual_population_db_combined_df,
     get_virtual_population_db_data_json,
     update_virtual_population_db_data_json,
+    update_virtual_population_db_record_merged,
+    update_virtual_population_db_record_persona_reflection_only,
     find_virtual_population_db_id,
     insert_virtual_population_db,
+    insert_virtual_population_db_chunked,
+    VPD_CHUNK_SIZE,
 )
 from core.session_cache import get_sido_master
 from utils.step2_records import list_step2_records
 from utils.gemini_client import GeminiClient
+
+
+def _vdb_update_cached_record(sido_code: str, record_id: int, new_data_json: str) -> None:
+    """캐시된 (id, data_json) 목록에서 해당 record_id의 data_json만 갱신 (Supabase 실시간 반영 대신 메모리만)."""
+    key = f"vdb_cached_jsons_{sido_code}"
+    cached = st.session_state.get(key) or []
+    new_list = [(rid, new_data_json if rid == record_id else js) for (rid, js) in cached]
+    st.session_state[key] = new_list
+
+
+def _vdb_update_cached_records_batch(sido_code: str, record_dfs: dict) -> None:
+    """여러 record의 df를 캐시에 일괄 반영. record_dfs: {record_id: DataFrame}."""
+    key = f"vdb_cached_jsons_{sido_code}"
+    cached = st.session_state.get(key) or []
+    new_list = [
+        (rid, record_dfs[rid].to_json(orient="records", force_ascii=False)) if rid in record_dfs else (rid, js)
+        for (rid, js) in cached
+    ]
+    st.session_state[key] = new_list
 
 
 @st.cache_data(ttl=60)
@@ -59,62 +83,95 @@ def _cached_koreamap_svg_content() -> str | None:
         return f.read()
 
 
-def _render_korea_map(selected_sido_code: str):
-    """koreamap.svg 기반 인터랙티브 지도. 기본 그레이, 호버 검정, 선택 붉은색. 클릭 시 쿼리로 연동."""
-    svg_content = _cached_koreamap_svg_content()
-    if not svg_content:
-        st.caption("지도 파일을 찾을 수 없습니다: koreamap.svg (프로젝트 루트에 koreamap.svg가 있는지 확인해주세요.)")
-        return
-    svg_content = svg_content.replace('width="800" height="759" viewBox="0 0 800 759"', 'viewBox="0 0 800 759" preserveAspectRatio="xMidYMid meet"')
-    svg_content = svg_content.replace("<path ", '<path class="map-region" ')
-    name_to_code = {s["sido_name"]: s["sido_code"] for s in SIDO_MASTER}
-    code_to_name = SIDO_CODE_TO_NAME
-    html = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  * { box-sizing: border-box; }
-  body { margin: 0; padding: 8px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  .map-wrap { width: 100%; height: 504px; overflow: hidden; }
-  .map-wrap svg { width: 100%; height: 100%; display: block; object-fit: contain; object-position: center; }
-  .map-region { fill: #9ca3af; stroke: #000; stroke-width: 0.6; cursor: pointer; transition: fill 0.15s ease; }
-  .map-region:hover { fill: #000; }
-  .map-region.selected { fill: #dc2626; stroke: #000; }
-</style>
-</head>
-<body>
-  <div class="map-wrap">""" + svg_content + """</div>
-  <script>
-    (function() {
-      var nameToCode = """ + json.dumps(name_to_code, ensure_ascii=False) + """;
-      var codeToName = """ + json.dumps(code_to_name, ensure_ascii=False) + """;
-      var initCode = """ + json.dumps(selected_sido_code, ensure_ascii=False) + """;
-      var paths = document.querySelectorAll('#전국_시도_경계 .map-region');
-      /* 양방향 바인딩: path 클릭 시 URL에 sido_code 반영 → 페이지 로드 시 서버에서 vdb_sido_select 갱신 → 드롭다운 value 즉시 변경 */
-      function setSelected(path) {
-        paths.forEach(function(p) { p.classList.remove('selected'); });
-        if (path) {
-          path.classList.add('selected');
-          var code = nameToCode[path.id || ''] || '';
-          if (code && window.top && window.top.location) {
-            var url = new URL(window.top.location.href);
-            url.searchParams.set('sido_code', code);
-            window.top.location.href = url.toString();
-          }
-        }
-      }
-      paths.forEach(function(p) {
-        p.addEventListener('click', function() { setSelected(p); });
-      });
-      var initPath = document.getElementById(codeToName[initCode] || '');
-      if (initPath) initPath.classList.add('selected');
-    })();
-  </script>
-</body>
-</html>"""
-    st.components.v1.html(html, height=552, scrolling=False)
+# 한국 시도 GeoJSON URL (WGS84, properties.code = 시도코드 문자열)
+KOREA_SIDO_GEOJSON_URL = "https://raw.githubusercontent.com/southkorea/southkorea-maps/master/kostat/2013/json/skorea_provinces_geo_simple.json"
+
+
+@st.cache_data(ttl=3600)
+def _load_korea_sido_geojson():
+    """한국 시도 GeoJSON 로드. properties.code를 모두 문자열(str)로 통일해 DataFrame과 매칭 보장."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(KOREA_SIDO_GEOJSON_URL, timeout=15) as resp:
+            geojson = json.loads(resp.read().decode())
+    except Exception:
+        return None
+    if not geojson or geojson.get("type") != "FeatureCollection":
+        return None
+    features = list(geojson.get("features") or [])
+    for f in features:
+        prop = f.get("properties") or {}
+        code = prop.get("code")
+        if code is not None:
+            prop["code"] = str(code).strip()
+        if "name" not in prop and "name_eng" in prop:
+            prop["name"] = prop["name_eng"]
+    return geojson
+
+
+def _build_korea_choropleth_figure(selected_sido_code: str, region_stats: dict):
+    """시도별 Choropleth Map. GeoJSON과 DataFrame locations를 모두 문자열로 맞춰 폴리곤이 정상 렌더되도록 함."""
+    import plotly.graph_objects as go
+    geojson = _load_korea_sido_geojson()
+    if not geojson:
+        st.caption("지도 데이터(GeoJSON)를 불러올 수 없습니다.")
+        return go.Figure()
+    sidos_for_map = [s for s in SIDO_MASTER if s["sido_code"] != "00"]
+    locations = []
+    z_vals = []
+    hover_texts = []
+    customdata_list = []
+    for s in sidos_for_map:
+        code = str(s["sido_code"]).strip()
+        name = s["sido_name"]
+        vdb = (region_stats.get(code) or {}).get("vdb_count") or 0
+        locations.append(code)
+        z_vals.append(2 if code == selected_sido_code else 1)
+        hover_texts.append(f"{name}<br>가상인구 DB: {vdb:,}명")
+        customdata_list.append([code])
+    fig = go.Figure(
+        go.Choroplethmapbox(
+            geojson=geojson,
+            featureidkey="properties.code",
+            locations=locations,
+            z=z_vals,
+            text=hover_texts,
+            hoverinfo="text",
+            customdata=customdata_list,
+            colorscale=[[0, "#e5e7eb"], [0.5, "#9ca3af"], [1, "#dc2626"]],
+            zmin=1,
+            zmax=2,
+            showscale=False,
+            marker_line_width=1.2,
+            marker_line_color="white",
+        )
+    )
+    fig.update_layout(
+        mapbox=dict(
+            style="carto-positron",
+            center=dict(lat=36.0, lon=127.8),
+            zoom=5.8,
+            bounds={"west": 124, "east": 132, "south": 33, "north": 39},
+        ),
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=420,
+        showlegend=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def _render_korea_map(selected_sido_code: str, region_stats: dict):
+    """Plotly Choropleth 스타일 지도. 클릭 시 on_select='rerun' → 세션(vdb_map)에 선택 저장 → fragment 상단에서 vdb_sido_select와 동기화."""
+    fig = _build_korea_choropleth_figure(selected_sido_code, region_stats)
+    st.plotly_chart(
+        fig,
+        key="vdb_map",
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="points",
+    )
 
 
 def page_virtual_population_db():
@@ -125,21 +182,52 @@ def page_virtual_population_db():
 
     @st.fragment
     def _vdb_frag():
-        # ---------- 양방향 바인딩: 단일 상태(selected_region_label)로 지도·드롭다운 동기화 ----------
-        # 지도 클릭 → URL ?sido_code=XX → 이 블록에서 드롭다운용 상태 갱신 → 드롭다운 value 반영
+        # ---------- 양방향 바인딩: 단일 세션 변수(vdb_sido_select)로 지도·드롭다운 동기화 ----------
+        if "vdb_sido_select" not in st.session_state:
+            st.session_state["vdb_sido_select"] = "경상북도 (37)"
         query_sido = st.query_params.get("sido_code")
-        selected_region_label = None
         if query_sido:
             for s in SIDO_MASTER:
                 if s["sido_code"] == query_sido:
-                    selected_region_label = f"{s['sido_name']} ({s['sido_code']})"
+                    label = f"{s['sido_name']} ({s['sido_code']})"
+                    st.session_state["selected_sido_label"] = label
+                    st.session_state["vdb_sido_select"] = label
                     break
-        if selected_region_label:
-            st.session_state["selected_sido_label"] = selected_region_label
-            st.session_state["vdb_sido_select"] = selected_region_label  # 드롭다운 value와 동기화
+        # 지도 클릭(Plotly on_select) 시 세션에 저장된 선택을 셀렉트박스에 반영
+        map_state = st.session_state.get("vdb_map")
+        if map_state and getattr(map_state, "selection", None):
+            sel = map_state.selection
+            pts = getattr(sel, "points", None) or []
+            if pts:
+                p0 = pts[0]
+                p0_dict = p0 if isinstance(p0, dict) else (getattr(p0, "__dict__", None) or {})
+                cd = p0_dict.get("customdata")
+                loc_id = p0_dict.get("location")  # Choroplethmapbox는 클릭한 feature의 id(location)
+                loc_idx = p0_dict.get("point_index")
+                code = None
+                if cd and len(cd) > 0:
+                    code = str(cd[0])
+                if not code and loc_id is not None:
+                    code = str(loc_id)
+                if not code and loc_idx is not None and loc_idx < len(SIDO_MASTER):
+                    sidos_ordered = [s["sido_code"] for s in SIDO_MASTER if s["sido_code"] != "00"]
+                    if loc_idx < len(sidos_ordered):
+                        code = str(sidos_ordered[loc_idx])
+                if code:
+                    label = f"{SIDO_CODE_TO_NAME.get(code, '')} ({code})"
+                    st.session_state["vdb_sido_select"] = label
+                    st.session_state["selected_sido_label"] = label
 
         # 시도별 통계 (가상인구 DB 수; core.db get_sido_vdb_stats 캐싱 활용)
-        vdb_stats = get_sido_vdb_stats()
+        try:
+            vdb_stats = get_sido_vdb_stats()
+        except Exception as e:
+            vdb_stats = {}
+            err_msg = str(e)
+            if "521" in err_msg or "Web server is down" in err_msg or "JSON could not be generated" in err_msg:
+                st.warning("Supabase 서버에 일시적으로 연결할 수 없습니다. 잠시 후 다시 시도해주세요.")
+            else:
+                st.warning(f"시도별 통계를 불러오지 못했습니다: {err_msg[:200]}")
         region_stats = {}
         for s in SIDO_MASTER:
             if s["sido_code"] == "00":
@@ -151,29 +239,28 @@ def page_virtual_population_db():
                 "total_pop": SIDO_TOTAL_POP.get(code),
             }
 
-        # 공유 상태: 쿼리 또는 세션에서 결정된 현재 선택 지역 (지도·드롭다운 동일 소스)
-        map_sido_code = query_sido or SIDO_LABEL_TO_CODE.get(
-            st.session_state.get("selected_sido_label", "경상북도 (37)"), "37"
-        )
+        # 공유 상태: 쿼리 또는 세션(vdb_sido_select)에서 결정된 현재 선택 지역
+        current_label = st.session_state.get("vdb_sido_select") or st.session_state.get("selected_sido_label", "경상북도 (37)")
+        map_sido_code = query_sido or SIDO_LABEL_TO_CODE.get(current_label, "37")
         sido_master = _cached_sido_master()
         sido_options = [f"{s['sido_name']} ({s['sido_code']})" for s in sido_master]
-        default_label = st.session_state.get("selected_sido_label", "경상북도 (37)")
+        default_label = st.session_state.get("vdb_sido_select") or st.session_state.get("selected_sido_label", "경상북도 (37)")
         default_idx = sido_options.index(default_label) if default_label in sido_options else 0
 
         # 상단 2분할: 왼쪽(5) 지도+선택정보(세로 8:2), 오른쪽(5) 가상인구 DB
         col_left, col_db = st.columns([5, 5])
         with col_left:
-            # 드롭다운 value = vdb_sido_select(지도 클릭 시 위에서 갱신됨) 또는 index로 동기화
+            # 셀렉트박스: key로 vdb_sido_select와 연동, 지도 클릭 시 위에서 세션 갱신되어 동기화
             selected_sido_label = st.selectbox(
                 "지역 선택",
                 options=sido_options,
                 index=default_idx,
-                key="vdb_sido_select"
+                key="vdb_sido_select",
             )
-            # 지도 영역: 컨테이너로 고정하여 렌더 시 레이아웃 밀림 방지
+            map_sido_code = SIDO_LABEL_TO_CODE.get(selected_sido_label, map_sido_code)
             map_container = st.container()
             with map_container:
-                _render_korea_map(SIDO_LABEL_TO_CODE.get(selected_sido_label, map_sido_code))
+                _render_korea_map(map_sido_code, region_stats)
             st.subheader("선택한 지역 정보")
             display_code = SIDO_LABEL_TO_CODE.get(selected_sido_label, map_sido_code)
             if display_code and region_stats.get(display_code):
@@ -193,15 +280,44 @@ def page_virtual_population_db():
         # 상단 오른쪽(5) 열: 가상인구 DB (지도 옆에 표·다운로드·버튼)
         with col_db:
             st.subheader("가상인구 DB")
-            db_records = list_virtual_population_db_data_jsons(selected_sido_code)
+            # 먼저 경량 메타만 조회 (data_json 제외 → timeout 방지)
+            meta_list = list_virtual_population_db_metadata(selected_sido_code)
+            load_full_key = f"vdb_full_data_loaded_{selected_sido_code}"
+            user_requested_full = st.session_state.get(load_full_key, False)
 
-            if not db_records:
+            if not meta_list:
                 st.info("가상인구 DB에 데이터가 없습니다. 아래 2차 대입결과에서 선택하여 추가해주세요.")
                 combined_df = None
                 all_dfs = []
                 persona_count = 0
                 total_count = 0
+                db_records = []
+            elif not user_requested_full:
+                # 전체 데이터는 불러오지 않음. 버튼을 누르면 그때 Supabase에서 로드
+                st.caption(f"총 **{len(meta_list)}건**의 기록이 있습니다. 표·다운로드를 보려면 아래 버튼을 눌러주세요.")
+                if st.button("전체 데이터 불러오기 (표·다운로드)", type="primary", key="vdb_load_full_btn"):
+                    st.session_state[load_full_key] = True
+                    st.rerun()
+                combined_df = None
+                all_dfs = []
+                persona_count = 0
+                total_count = 0
+                db_records = []
             else:
+                # 사용자가 "전체 데이터 불러오기"를 눌렀을 때만 data_json 조회 (페이지 단위로 수행)
+                cache_key = f"vdb_cached_jsons_{selected_sido_code}"
+                db_records = st.session_state.get(cache_key)
+                if db_records is None:
+                    try:
+                        with st.spinner("Supabase에서 전체 데이터를 불러오는 중입니다… (데이터가 많으면 1~2분 걸릴 수 있습니다)"):
+                            db_records = list_virtual_population_db_data_jsons(selected_sido_code)
+                        st.session_state[cache_key] = db_records
+                    except Exception as e:
+                        if "timeout" in str(e).lower() or "57014" in str(e):
+                            st.error("Supabase 조회 시간이 초과되었습니다. 데이터가 많을 경우 **DB 저장**은 소량씩 나눠 진행하거나, Supabase 대시보드에서 statement timeout을 늘려보세요.")
+                        else:
+                            st.error(f"데이터 불러오기 실패: {e}")
+                        db_records = []
                 all_dfs = []
                 for _record_id, data_json in db_records:
                     try:
@@ -239,6 +355,37 @@ def page_virtual_population_db():
             if db_records and all_dfs and combined_df is not None:
                 st.caption(f"총 {total_count:,}명의 데이터 (모든 기록 누적)")
                 st.caption(f"페르소나 생성 완료: {persona_count:,}명 / 전체 {total_count:,}명")
+                # 페르소나·현시대 반영은 메모리(캐시)만 반영됨. Supabase에 저장하려면 아래 버튼 클릭
+                cache_key_save = f"vdb_cached_jsons_{selected_sido_code}"
+                if st.button("기록을 DB에 추가", type="primary", key="vdb_sync_to_supabase"):
+                    to_sync = st.session_state.get(cache_key_save) or []
+                    if not to_sync:
+                        st.warning("반영할 캐시 데이터가 없습니다.")
+                    else:
+                        sync_bar = None
+                        try:
+                            sync_bar = st.progress(0.0, text="Supabase에 저장 중…")
+                            persona_only_ok = 0
+                            for i, (rid, data_json) in enumerate(to_sync):
+                                if update_virtual_population_db_record_persona_reflection_only(rid, data_json):
+                                    persona_only_ok += 1
+                                else:
+                                    update_virtual_population_db_record_merged(rid, data_json)
+                                sync_bar.progress((i + 1) / len(to_sync), text=f"저장 중… {i+1}/{len(to_sync)}")
+                            sync_bar.empty()
+                            st.success(f"총 {len(to_sync)}건의 기록을 Supabase에 반영했습니다.")
+                        except Exception as e:
+                            if sync_bar is not None:
+                                try:
+                                    sync_bar.empty()
+                                except Exception:
+                                    pass
+                            err_msg = str(e)
+                            if "521" in err_msg or "Web server is down" in err_msg or "JSON could not be generated" in err_msg:
+                                st.error("Supabase 서버가 일시적으로 응답하지 않습니다. 잠시 후 **기록을 DB에 추가**를 다시 눌러 주세요.")
+                            else:
+                                st.error(f"DB 반영 중 오류: {err_msg[:300]}")
+                    st.rerun()
 
             # 표시: 미리보기 100명만 표시 (전체 표시 시 인원 많을 때 느려짐), 다운로드는 전체
             if combined_df is not None:
@@ -279,6 +426,8 @@ def page_virtual_population_db():
                             get_virtual_population_db_combined_df.clear()
                             get_sido_vdb_stats.clear()
                             st.session_state.vdb_selected_records = []
+                            st.session_state.pop(f"vdb_full_data_loaded_{selected_sido_code}", None)
+                            st.session_state.pop(f"vdb_cached_jsons_{selected_sido_code}", None)
                             st.success(f"{selected_sido_name} 지역의 가상인구 DB가 초기화되었습니다.")
                         else:
                             st.error("초기화 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
@@ -316,9 +465,9 @@ def page_virtual_population_db():
                         next_index = st.session_state.get("persona_next_index", 0)
                         total_work = st.session_state.get("persona_total", 0)
                         if work_queue is None:
-                            pgr_rows = list_virtual_population_db_data_jsons(selected_sido_code)
+                            pgr_rows = st.session_state.get(f"vdb_cached_jsons_{selected_sido_code}")
                             if not pgr_rows:
-                                st.warning("가상인구 DB에 데이터가 없습니다. 먼저 데이터를 추가해주세요.")
+                                st.warning("가상인구 DB 전체 데이터가 없습니다. 상단에서 **전체 데이터 불러오기**를 누른 뒤 다시 시도해주세요.")
                                 st.session_state.persona_generation_running = False
                             else:
                                 work_queue = []
@@ -358,10 +507,12 @@ def page_virtual_population_db():
                                     st.rerun()
                                 else:
                                     gemini_client = GeminiClient()
-                                    batch_size = 5
+                                    batch_size = 1  # 1명씩 처리 후 rerun → 중지 버튼 클릭 시 최대 1건만 더 진행되고 즉시 중단
                                     batch_end = min(next_index + batch_size, total_work)
                                     progress_bar = st.progress(next_index / total_work if total_work else 0)
                                     status_placeholder = st.empty()
+                                    cache_key = f"vdb_cached_jsons_{selected_sido_code}"
+                                    id_to_json = {rid: js for (rid, js) in (st.session_state.get(cache_key) or [])}
                                     record_dfs = {}
                                     for i in range(next_index, batch_end):
                                         item = work_queue[i]
@@ -374,7 +525,7 @@ def page_virtual_population_db():
                                             persona_text = ""
                                         rid, row_idx = item["record_id"], item["row_idx"]
                                         if rid not in record_dfs:
-                                            data_json = get_virtual_population_db_data_json(rid)
+                                            data_json = id_to_json.get(rid) or get_virtual_population_db_data_json(rid)
                                             if data_json:
                                                 df = pd.read_json(data_json, orient="records")
                                                 if "페르소나" not in df.columns:
@@ -384,8 +535,8 @@ def page_virtual_population_db():
                                             record_dfs[rid].at[row_idx, "페르소나"] = persona_text
                                         status_placeholder.caption(f"처리 중: {batch_end}/{total_work}명")
                                         progress_bar.progress(batch_end / total_work)
-                                    for rid, update_df in record_dfs.items():
-                                        update_virtual_population_db_data_json(rid, update_df.to_json(orient="records", force_ascii=False))
+                                    # 실시간 Supabase 업로드 대신 캐시만 갱신 → 나중에 '기록을 DB에 추가'로 반영
+                                    _vdb_update_cached_records_batch(selected_sido_code, record_dfs)
                                     st.session_state.persona_next_index = batch_end
                                     if batch_end >= total_work:
                                         progress_bar.empty()
@@ -441,6 +592,7 @@ def page_virtual_population_db():
                     if selected_record_keys:
                         if st.button("선택한 기록을 DB에 추가", type="primary", use_container_width=True, key="vdb_add_records"):
                             added_count = 0
+                            errors = []
                             for item in selected_record_keys:
                                 record = item["record"]
                                 excel_path = item["excel_path"]
@@ -448,7 +600,7 @@ def page_virtual_population_db():
                                     continue
                                 existing_personas = {}
                                 existing_reflections = {}
-                                for _eid, existing_data_json in list_virtual_population_db_data_jsons(selected_sido_code):
+                                for _eid, existing_data_json in (st.session_state.get(f"vdb_cached_jsons_{selected_sido_code}") or []):
                                     try:
                                         existing_df = pd.read_json(existing_data_json, orient="records")
                                         if "가상이름" in existing_df.columns and "페르소나" in existing_df.columns:
@@ -501,21 +653,56 @@ def page_virtual_population_db():
                                                     if name in existing_reflections:
                                                         df.at[idx, "현시대 반영"] = existing_reflections[name]
                                     data_json = df.to_json(orient="records", force_ascii=False)
-                                    if insert_virtual_population_db(selected_sido_code, selected_sido_name, record.get("timestamp", ""), excel_path, data_json) is not None:
+                                    total_rows = len(df)
+                                    if total_rows > VPD_CHUNK_SIZE:
+                                        progress_container = st.container()
+                                        with progress_container:
+                                            progress_bar = st.progress(0.0, text="데이터 업로드 중... (0/%d)" % total_rows)
+                                            def _progress(done: int, total: int):
+                                                progress_bar.progress(min(1.0, done / total) if total else 1.0, text="데이터 업로드 중... (%d/%d)" % (done, total))
+                                            try:
+                                                new_id = insert_virtual_population_db_chunked(
+                                                    selected_sido_code,
+                                                    selected_sido_name,
+                                                    record.get("timestamp", ""),
+                                                    excel_path,
+                                                    data_json,
+                                                    chunk_size=VPD_CHUNK_SIZE,
+                                                    progress_callback=_progress,
+                                                )
+                                            finally:
+                                                progress_container.empty()
+                                    else:
+                                        new_id = insert_virtual_population_db(selected_sido_code, selected_sido_name, record.get("timestamp", ""), excel_path, data_json)
+                                    if new_id is not None:
                                         added_count += 1
+                                except FileNotFoundError as e:
+                                    err_msg = f"Excel 파일 없음: {os.path.basename(excel_path)} (로컬 경로만 가능, 배포 환경에서는 2차 대입 결과가 서버에 없을 수 있음)"
+                                    errors.append(err_msg)
+                                    st.warning(err_msg)
                                 except Exception as e:
-                                    st.warning(f"기록 추가 실패: {excel_path} - {e}")
+                                    err_msg = f"{os.path.basename(excel_path)}: {e}"
+                                    errors.append(err_msg)
+                                    st.warning(f"기록 추가 실패: {err_msg}")
+                                    if "row-level security" in str(e).lower() or "rls" in str(e).lower() or "policy" in str(e).lower():
+                                        st.info("💡 Supabase **virtual_population_db** 테이블에 anon 역할 INSERT 정책이 있는지 확인하세요. (docs/SUPABASE_RLS_정책_적용.sql 참고)")
                             if added_count > 0:
                                 st.success(f"{added_count}개의 기록이 가상인구 DB에 추가되었습니다.")
                                 st.session_state.vdb_selected_records = []
                                 st.rerun()
+                            elif errors:
+                                st.error("추가 실패 요약")
+                                for err in errors[:5]:
+                                    st.caption(f"• {err}")
+                                if len(errors) > 5:
+                                    st.caption(f"… 외 {len(errors)-5}건")
                             else:
                                 st.info("추가할 새로운 기록이 없습니다. (이미 추가된 기록은 제외됩니다)")
 
-                # DB에 저장된 2차 대입결과 목록 — 삭제 기능 (선택 시도 기준, 항상 표시)
+                # DB에 저장된 2차 대입결과 목록 — 삭제 기능 (메타만 조회, data_json 미포함 → timeout 방지)
                 st.markdown("---")
                 st.markdown("**DB에 저장된 2차 대입결과 (삭제)**")
-                db_records = list_virtual_population_db_records_all(selected_sido_code)
+                db_records = list_virtual_population_db_metadata(selected_sido_code)
                 if not db_records:
                     st.caption("DB에 저장된 기록이 없습니다.")
                 else:
@@ -525,10 +712,10 @@ def page_virtual_population_db():
                         ts = rec.get("record_timestamp", "")
                         path = rec.get("record_excel_path", "")
                         path_short = os.path.basename(path) if path else "-"
-                        rows = rec.get("rows", 0)
+                        chunk_count = rec.get("chunk_count", 0)
                         col_label, col_btn = st.columns([4, 1])
                         with col_label:
-                            st.text(f"{ts} | {rows}명 | {path_short}")
+                            st.text(f"{ts} | {chunk_count}개 청크 | {path_short}")
                         with col_btn:
                             if st.button("삭제", key=f"vdb_del_{rid}", type="secondary"):
                                 if delete_virtual_population_db_record(rid):
@@ -656,9 +843,9 @@ def page_virtual_population_db():
                         st.warning("현시대 자료가 없습니다. 다시 텍스트/PDF를 입력한 뒤 실행해주세요.")
                         st.session_state.learn_running = False
                     else:
-                        db_rows = list_virtual_population_db_data_jsons(run_sido)
+                        db_rows = st.session_state.get(f"vdb_cached_jsons_{run_sido}")
                         if not db_rows:
-                            st.warning("가상인구 DB에 데이터가 없습니다.")
+                            st.warning("가상인구 DB에 데이터가 없습니다. 해당 시도를 선택한 뒤 **전체 데이터 불러오기**를 먼저 실행해주세요.")
                             st.session_state.learn_running = False
                         else:
                             try:
@@ -731,7 +918,8 @@ def page_virtual_population_db():
                                         except Exception:
                                             pass
                                         new_json = df.to_json(orient="records", force_ascii=False)
-                                        update_virtual_population_db_data_json(record_id, new_json)
+                                        # 실시간 Supabase 업로드 대신 캐시만 갱신 → 나중에 '기록을 DB에 추가'로 반영
+                                        _vdb_update_cached_record(run_sido, record_id, new_json)
                                         processed_this_run += 1
                                         progress_bar.progress(processed_this_run / len(chunk))
                                 
@@ -757,10 +945,13 @@ def page_virtual_population_db():
                                     st.session_state.pop(k, None)
                 st.markdown("---")
         
-            # 가상인구 선택 UI (1:1대화, 5:1대화 모드일 때만)
+            # 가상인구 선택 UI (1:1대화, 5:1대화 모드일 때만). 전체 데이터는 '전체 데이터 불러오기' 후 캐시에만 있음 (자동 조회 시 timeout 방지)
             if st.session_state.chat_mode in ["1:1대화", "5:1대화"]:
-                # DB에서 가상인구 데이터 가져오기
-                db_rows = list_virtual_population_db_data_jsons(selected_sido_code)
+                db_rows = st.session_state.get(f"vdb_cached_jsons_{selected_sido_code}")
+                if not db_rows and st.session_state.get(f"vdb_full_data_loaded_{selected_sido_code}"):
+                    st.caption("표시할 데이터를 불러오는 중이거나 오류가 났습니다. 상단 **전체 데이터 불러오기**를 다시 눌러보세요.")
+                elif not db_rows:
+                    st.caption("1:1대화·5:1대화를 사용하려면 상단 **전체 데이터 불러오기**를 먼저 눌러주세요.")
                 if db_rows:
                     # 모든 데이터를 하나의 DataFrame으로 합치기
                     all_dfs = []
@@ -1229,9 +1420,9 @@ def page_virtual_population_db():
                                         """, unsafe_allow_html=True)
                         
                             else:
-                                db_rows = list_virtual_population_db_data_jsons(selected_sido_code)
+                                db_rows = st.session_state.get(f"vdb_cached_jsons_{selected_sido_code}")
                                 if not db_rows:
-                                    response_text = "가상인구 DB에 데이터가 없습니다. 먼저 데이터를 추가해주세요."
+                                    response_text = "가상인구 DB에 데이터가 없습니다. 상단에서 **전체 데이터 불러오기**를 누른 뒤 다시 시도해주세요."
                                 else:
                                     all_dfs = []
                                     for _rid, data_json in db_rows:
@@ -1299,7 +1490,7 @@ def page_virtual_population_db():
                             if selected_people is not None:
                                 chat_entry["people_info"] = [p.to_dict() if hasattr(p, 'to_dict') else dict(p) for p in selected_people]
                         else:
-                            db_rows = list_virtual_population_db_data_jsons(selected_sido_code)
+                            db_rows = st.session_state.get(f"vdb_cached_jsons_{selected_sido_code}")
                             if db_rows:
                                 all_dfs = []
                                 for _rid, data_json in db_rows:
