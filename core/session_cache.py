@@ -79,7 +79,7 @@ def invalidate_db_stats_cache(sido_code: Optional[str] = None):
 
 
 def invalidate_db_axis_margin_cache(sido_code: Optional[str] = None):
-    """axis_margin / six_axis 캐시 무효화."""
+    """axis_margin / six_axis 세션 캐시 무효화 (다른 페이지에서 get_cached_db_axis_margin_stats 사용 시 최신 조회)."""
     for prefix in ("_cache_db_axis_margin_", "_cache_db_six_axis_stat_ids_"):
         to_del = [k for k in list(st.session_state.keys()) if k.startswith(prefix)]
         if sido_code is not None:

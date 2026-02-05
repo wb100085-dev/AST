@@ -11,7 +11,19 @@ import time
 from io import BytesIO
 
 from core.constants import SIDO_LABEL_TO_CODE, SIDO_CODE_TO_NAME, SIDO_MASTER, SIDO_TOTAL_POP
-from core.db import db_conn, get_sido_vdb_stats, delete_virtual_population_db_record, delete_virtual_population_db_by_sido, list_virtual_population_db_records_all, list_virtual_population_db_records, get_virtual_population_db_combined_df
+from core.db import (
+    get_sido_vdb_stats,
+    delete_virtual_population_db_record,
+    delete_virtual_population_db_by_sido,
+    list_virtual_population_db_records_all,
+    list_virtual_population_db_records,
+    list_virtual_population_db_data_jsons,
+    get_virtual_population_db_combined_df,
+    get_virtual_population_db_data_json,
+    update_virtual_population_db_data_json,
+    find_virtual_population_db_id,
+    insert_virtual_population_db,
+)
 from core.session_cache import get_sido_master
 from utils.step2_records import list_step2_records
 from utils.gemini_client import GeminiClient
@@ -181,15 +193,9 @@ def page_virtual_population_db():
         # 상단 오른쪽(5) 열: 가상인구 DB (지도 옆에 표·다운로드·버튼)
         with col_db:
             st.subheader("가상인구 DB")
-            conn = db_conn()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-                (selected_sido_code,)
-            )
-            db_rows = cur.fetchall()
+            db_records = list_virtual_population_db_data_jsons(selected_sido_code)
 
-            if not db_rows:
+            if not db_records:
                 st.info("가상인구 DB에 데이터가 없습니다. 아래 2차 대입결과에서 선택하여 추가해주세요.")
                 combined_df = None
                 all_dfs = []
@@ -197,9 +203,8 @@ def page_virtual_population_db():
                 total_count = 0
             else:
                 all_dfs = []
-                for row in db_rows:
+                for _record_id, data_json in db_records:
                     try:
-                        data_json = row[0]
                         df = pd.read_json(data_json, orient="records")
                         if "식별NO" in df.columns:
                             df = df.drop(columns=["식별NO"])
@@ -231,15 +236,18 @@ def page_virtual_population_db():
                     total_count = len(combined_df)
                     persona_count = combined_df["페르소나"].apply(lambda x: str(x).strip() != "" and str(x).strip() != "nan").sum() if "페르소나" in combined_df.columns else 0
 
-            if db_rows and all_dfs and combined_df is not None:
+            if db_records and all_dfs and combined_df is not None:
                 st.caption(f"총 {total_count:,}명의 데이터 (모든 기록 누적)")
                 st.caption(f"페르소나 생성 완료: {persona_count:,}명 / 전체 {total_count:,}명")
 
-            # 표시: 통계·버튼 아래에 표와 다운로드 (지도 옆 col_db 안)
+            # 표시: 미리보기 100명만 표시 (전체 표시 시 인원 많을 때 느려짐), 다운로드는 전체
             if combined_df is not None:
                 table_container = st.container()
                 with table_container:
-                    st.dataframe(combined_df, use_container_width=True, height=600)
+                    preview_limit = 100
+                    preview_df = combined_df.head(preview_limit)
+                    st.caption(f"미리보기 (상위 {preview_limit}명) — 전체 {total_count:,}명 중 표시. Excel/CSV 다운로드는 전체 데이터 포함.")
+                    st.dataframe(preview_df, use_container_width=True, height=600)
                     col_dl1, col_dl2 = st.columns(2)
                     with col_dl1:
                         out_buffer = BytesIO()
@@ -304,25 +312,18 @@ def page_virtual_population_db():
                         st.rerun()
                     # 페르소나 생성 로직: 배치마다 DB 저장 후 rerun 해서 중지 버튼이 즉시 반영되도록 함
                     if st.session_state.persona_generation_running and not st.session_state.persona_generation_stop:
-                        conn = db_conn()
-                        cur = conn.cursor()
                         work_queue = st.session_state.get("persona_work_queue")
                         next_index = st.session_state.get("persona_next_index", 0)
                         total_work = st.session_state.get("persona_total", 0)
                         if work_queue is None:
-                            cur.execute(
-                                "SELECT id, data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-                                (selected_sido_code,)
-                            )
-                            pgr_rows = cur.fetchall()
+                            pgr_rows = list_virtual_population_db_data_jsons(selected_sido_code)
                             if not pgr_rows:
                                 st.warning("가상인구 DB에 데이터가 없습니다. 먼저 데이터를 추가해주세요.")
                                 st.session_state.persona_generation_running = False
                             else:
                                 work_queue = []
-                                for row in pgr_rows:
+                                for record_id, data_json in pgr_rows:
                                     try:
-                                        record_id, data_json = row[0], row[1]
                                         df = pd.read_json(data_json, orient="records")
                                         if "페르소나" not in df.columns:
                                             df["페르소나"] = ""
@@ -373,10 +374,9 @@ def page_virtual_population_db():
                                             persona_text = ""
                                         rid, row_idx = item["record_id"], item["row_idx"]
                                         if rid not in record_dfs:
-                                            cur.execute("SELECT data_json FROM virtual_population_db WHERE id = ?", (rid,))
-                                            row = cur.fetchone()
-                                            if row:
-                                                df = pd.read_json(row[0], orient="records")
+                                            data_json = get_virtual_population_db_data_json(rid)
+                                            if data_json:
+                                                df = pd.read_json(data_json, orient="records")
                                                 if "페르소나" not in df.columns:
                                                     df["페르소나"] = ""
                                                 record_dfs[rid] = df
@@ -385,8 +385,7 @@ def page_virtual_population_db():
                                         status_placeholder.caption(f"처리 중: {batch_end}/{total_work}명")
                                         progress_bar.progress(batch_end / total_work)
                                     for rid, update_df in record_dfs.items():
-                                        cur.execute("UPDATE virtual_population_db SET data_json = ? WHERE id = ?", (update_df.to_json(orient="records", force_ascii=False), rid))
-                                    conn.commit()
+                                        update_virtual_population_db_data_json(rid, update_df.to_json(orient="records", force_ascii=False))
                                     st.session_state.persona_next_index = batch_end
                                     if batch_end >= total_work:
                                         progress_bar.empty()
@@ -441,22 +440,15 @@ def page_virtual_population_db():
                             selected_record_keys.append({"key": record_key, "record": r, "excel_path": excel_path})
                     if selected_record_keys:
                         if st.button("선택한 기록을 DB에 추가", type="primary", use_container_width=True, key="vdb_add_records"):
-                            conn = db_conn()
-                            cur = conn.cursor()
                             added_count = 0
                             for item in selected_record_keys:
                                 record = item["record"]
                                 excel_path = item["excel_path"]
-                                cur.execute(
-                                    "SELECT id FROM virtual_population_db WHERE sido_code = ? AND record_timestamp = ? AND record_excel_path = ?",
-                                    (selected_sido_code, record.get("timestamp", ""), excel_path)
-                                )
-                                if cur.fetchone():
+                                if find_virtual_population_db_id(selected_sido_code, record.get("timestamp", ""), excel_path) is not None:
                                     continue
                                 existing_personas = {}
                                 existing_reflections = {}
-                                cur.execute("SELECT data_json FROM virtual_population_db WHERE sido_code = ?", (selected_sido_code,))
-                                for (existing_data_json,) in cur.fetchall():
+                                for _eid, existing_data_json in list_virtual_population_db_data_jsons(selected_sido_code):
                                     try:
                                         existing_df = pd.read_json(existing_data_json, orient="records")
                                         if "가상이름" in existing_df.columns and "페르소나" in existing_df.columns:
@@ -509,18 +501,10 @@ def page_virtual_population_db():
                                                     if name in existing_reflections:
                                                         df.at[idx, "현시대 반영"] = existing_reflections[name]
                                     data_json = df.to_json(orient="records", force_ascii=False)
-                                    cur.execute(
-                                        """
-                                        INSERT INTO virtual_population_db 
-                                        (sido_code, sido_name, record_timestamp, record_excel_path, data_json)
-                                        VALUES (?, ?, ?, ?, ?)
-                                        """,
-                                        (selected_sido_code, selected_sido_name, record.get("timestamp", ""), excel_path, data_json)
-                                    )
-                                    added_count += 1
+                                    if insert_virtual_population_db(selected_sido_code, selected_sido_name, record.get("timestamp", ""), excel_path, data_json) is not None:
+                                        added_count += 1
                                 except Exception as e:
                                     st.warning(f"기록 추가 실패: {excel_path} - {e}")
-                            conn.commit()
                             if added_count > 0:
                                 st.success(f"{added_count}개의 기록이 가상인구 DB에 추가되었습니다.")
                                 st.session_state.vdb_selected_records = []
@@ -672,13 +656,7 @@ def page_virtual_population_db():
                         st.warning("현시대 자료가 없습니다. 다시 텍스트/PDF를 입력한 뒤 실행해주세요.")
                         st.session_state.learn_running = False
                     else:
-                        conn = db_conn()
-                        cur = conn.cursor()
-                        cur.execute(
-                            "SELECT id, data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-                            (run_sido,)
-                        )
-                        db_rows = cur.fetchall()
+                        db_rows = list_virtual_population_db_data_jsons(run_sido)
                         if not db_rows:
                             st.warning("가상인구 DB에 데이터가 없습니다.")
                             st.session_state.learn_running = False
@@ -753,8 +731,7 @@ def page_virtual_population_db():
                                         except Exception:
                                             pass
                                         new_json = df.to_json(orient="records", force_ascii=False)
-                                        cur.execute("UPDATE virtual_population_db SET data_json = ? WHERE id = ?", (new_json, record_id))
-                                        conn.commit()
+                                        update_virtual_population_db_data_json(record_id, new_json)
                                         processed_this_run += 1
                                         progress_bar.progress(processed_this_run / len(chunk))
                                 
@@ -783,28 +760,18 @@ def page_virtual_population_db():
             # 가상인구 선택 UI (1:1대화, 5:1대화 모드일 때만)
             if st.session_state.chat_mode in ["1:1대화", "5:1대화"]:
                 # DB에서 가상인구 데이터 가져오기
-                conn = db_conn()
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-                    (selected_sido_code,)
-                )
-                db_rows = cur.fetchall()
-            
+                db_rows = list_virtual_population_db_data_jsons(selected_sido_code)
                 if db_rows:
                     # 모든 데이터를 하나의 DataFrame으로 합치기
                     all_dfs = []
-                    for row in db_rows:
+                    for _rid, data_json in db_rows:
                         try:
-                            data_json = row[0]
                             df = pd.read_json(data_json, orient="records")
                             all_dfs.append(df)
                         except Exception:
                             continue
-                
                     if all_dfs:
                         combined_df = pd.concat(all_dfs, ignore_index=True)
-                    
                         if st.session_state.chat_mode == "1:1대화":
                             # 1명 선택: 연령대·성별·지역 수평 3개 + 가상인구 선택 아래. 세 개 모두 선택 시 한 번에 조회.
                             OPT_PROMPT = "선택하세요"
@@ -1262,20 +1229,13 @@ def page_virtual_population_db():
                                         """, unsafe_allow_html=True)
                         
                             else:
-                                conn = db_conn()
-                                cur = conn.cursor()
-                                cur.execute(
-                                    "SELECT data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-                                    (selected_sido_code,)
-                                )
-                                db_rows = cur.fetchall()
+                                db_rows = list_virtual_population_db_data_jsons(selected_sido_code)
                                 if not db_rows:
                                     response_text = "가상인구 DB에 데이터가 없습니다. 먼저 데이터를 추가해주세요."
                                 else:
                                     all_dfs = []
-                                    for row in db_rows:
+                                    for _rid, data_json in db_rows:
                                         try:
-                                            data_json = row[0]
                                             df = pd.read_json(data_json, orient="records")
                                             all_dfs.append(df)
                                         except Exception:
@@ -1339,25 +1299,18 @@ def page_virtual_population_db():
                             if selected_people is not None:
                                 chat_entry["people_info"] = [p.to_dict() if hasattr(p, 'to_dict') else dict(p) for p in selected_people]
                         else:
-                            conn = db_conn()
-                            cur = conn.cursor()
-                            cur.execute(
-                                "SELECT data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-                                (selected_sido_code,)
-                            )
-                            db_rows = cur.fetchall()
+                            db_rows = list_virtual_population_db_data_jsons(selected_sido_code)
                             if db_rows:
                                 all_dfs = []
-                                for row in db_rows:
+                                for _rid, data_json in db_rows:
                                     try:
-                                        data_json = row[0]
                                         df = pd.read_json(data_json, orient="records")
                                         all_dfs.append(df)
                                     except Exception:
                                         continue
-                                    if all_dfs:
-                                        combined_df = pd.concat(all_dfs, ignore_index=True)
-                                        chat_entry["total_count"] = len(combined_df)
+                                if all_dfs:
+                                    combined_df = pd.concat(all_dfs, ignore_index=True)
+                                    chat_entry["total_count"] = len(combined_df)
                         st.session_state.chat_history.append(chat_entry)
             
                 st.markdown('<div class="chat-container-wrapper">', unsafe_allow_html=True)

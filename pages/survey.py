@@ -283,15 +283,19 @@ def _generate_hypotheses_with_gemini(definition: str, needs: str) -> list[str]:
 def _generate_survey_questions_with_gemini(hypotheses: list[str]) -> list[dict]:
     """
     설정된 가설을 Gemini로 분석해 가설을 모두 증명할 수 있는 설문 문항 생성.
-    최대 25개: 객관식 약 20개, 주관식 약 5개.
-    반환: [{"type": "객관식"|"주관식", "title": "", "question": "", "options": ["A","B",...] 또는 []}, ...]
+    전부 객관식만 생성 (주관식 없음). 15~25개.
+    반환: [{"type": "객관식", "title": "", "question": "", "options": ["A","B",...]}, ...]
     """
     try:
         from utils.gemini_client import GeminiClient
     except Exception:
         return _default_survey_questions()
     hyp_text = "\n".join([f"가설 {i+1}: {h}" for i, h in enumerate(hypotheses[:3], 1)])
-    prompt = f"""당신은 시장성 조사 설계 전문가입니다. 아래 설정된 가설 3개를 정밀하게 분석한 뒤, 다음 주의사항을 반드시 지키며 가설을 모두 검증할 수 있는 설문 문항을 체계적으로 작성해주세요. 반드시 15개 이상 25개 이하의 문항을 출력하세요.
+    prompt = f"""당신은 시장성 조사 설계 전문가입니다. 아래 설정된 가설 3개를 정밀하게 분석한 뒤, 다음 주의사항을 반드시 지키며 가설을 모두 검증할 수 있는 설문 문항을 체계적으로 작성해주세요.
+
+[중요] 모든 문항은 반드시 객관식만 작성하세요. 주관식 문항은 사용하지 마세요. 각 문항마다 선택지(①~⑤)를 반드시 포함하세요.
+
+반드시 15개 이상 25개 이하의 문항을 출력하세요.
 
 [주의사항 – 설문 문항 작성 시 반드시 준수]
 
@@ -306,15 +310,15 @@ def _generate_survey_questions_with_gemini(hypotheses: list[str]) -> list[dict]:
 - 단순하고 구체적인 문장: 질문은 짧고 명확하게 작성하여 오해가 없도록 하세요.
 - 부정문·이중 부정 피하기: "...하지 않은 것은?" 같은 질문은 피하세요.
 
-3. 답변 항목 설계 (Answer Options)
-- 상호 배타적·포괄적 보기: 보기가 서로 겹치지 않게(Mutually Exclusive) 하고, 가능한 응답 범위를 모두 포함(Collectively Exhaustive)하세요. (예: 20-29세, 30-39세처럼 구간이 겹치지 않게)
+3. 답변 항목 설계 (Answer Options) — 모든 문항 객관식
+- 상호 배타적·포괄적 보기: 보기가 서로 겹치지 않게 하고, 가능한 응답 범위를 모두 포함하세요.
 - 균형 잡힌 척도: 만족도는 '매우 만족'~'매우 불만족'까지 균형 있게 배치하세요.
 - '기타', '해당 없음' 포함: 응답자가 선택할 수 없는 상황을 피할 수 있도록 보완 문항을 넣으세요.
+- 각 문항당 선택지 4~5개(또는 리커트 척도)를 반드시 작성하세요.
 
 4. 설문 흐름 및 배열 (Flow & Order)
 - 일반→구체: 가벼운 질문에서 시작해 점점 핵심·심층 질문으로 유도하세요.
 - 민감한 질문은 후반부: 소득·개인 정보 등은 설문 후반에 배치하세요.
-- 적절한 길이: 핵심 질문만 포함해 짧게 유지하세요.
 
 5. 기타 유의사항
 - 응답자 행동 예측 질문 주의: "만약 …하면 구매하시겠습니까?" 식의 미래 행동 예측 질문은 과대평가될 수 있으므로, 과거 행동·현재 인식 위주로 질문하세요.
@@ -322,29 +326,19 @@ def _generate_survey_questions_with_gemini(hypotheses: list[str]) -> list[dict]:
 [작성 절차]
 1) 각 가설을 분석하여 검증에 필요한 핵심 변인·하위 요인을 도출하세요.
 2) 도출된 변인별로 측정할 문항을 배치하세요. 문항 간 내용 중복을 피하세요.
-3) 객관식은 리커트 척도 또는 명확한 선택지 4~5개, 주관식은 심층 의견이 드러나도록 한 문장으로 작성하세요.
+3) 모든 문항을 객관식으로 작성하고, 각 문항에 선택지(①~⑤)를 반드시 포함하세요.
 4) 각 문항이 최소 하나의 가설 검증에 직접 기여하도록 하세요.
 
 [문항 수 – 반드시 준수]
-- 최소 15개 이상, 최대 25개 이하로 작성하세요. 1개나 소수만 만들지 말고, 가설 검증에 필요한 문항을 15개 이상 반드시 포함하세요.
-- 예: 객관식 약 12~20개, 주관식 약 3~5개 조합으로 총 15~25개.
-
-[문항 구성]
-- 총 15~25개: 처음에 스크리닝 문항을 포함하고, 가설별로 검증 문항을 충분히 배치하세요.
-- 객관식: 제목·질문·선택지(①~⑤)를 명확히 구분. 선택지에 '기타', '해당 없음' 등 보완 항목 포함.
-- 주관식: 제목·질문만 작성. 응답자가 자유 서술할 수 있는 형태로.
+- 최소 15개 이상, 최대 25개 이하. 전부 객관식으로만 작성하세요.
 
 [출력 형식] 아래 형식을 정확히 따르세요. 한 문항당 블록으로 구분하고, 제목에는 "문항 N" 또는 "N." 같은 번호를 붙이지 마세요.
-- 제목·질문·선택지에 스크리닝 관련 부가 설명을 넣지 마세요. (예: (➡️ H2, H3, H4 스크리닝 시 활용), (➡️ '개'를 선택하지 않은 경우, H2 스크리닝 시점부터는 '개' 양육자) 등) 순수한 제목·질문·선택지만 출력하세요.
+- 제목·질문·선택지에 스크리닝 관련 부가 설명을 넣지 마세요. 순수한 제목·질문·선택지만 출력하세요.
 ---
 유형: 객관식
 제목: (문항 제목 한 줄, 번호 없이)
 질문: (질문 내용)
 선택지: ① (내용) ② (내용) ③ (내용) ④ (내용) ⑤ (해당 없음/기타 등)
----
-유형: 주관식
-제목: (문항 제목 한 줄, 번호 없이)
-질문: (질문 내용)
 ---
 
 [설정된 가설]
@@ -465,8 +459,7 @@ def _parse_survey_questions_from_text(text: str) -> list[dict]:
         if not block:
             continue
         q = {"type": "객관식", "title": "", "question": "", "options": []}
-        if "유형: 주관식" in block or "유형:주관식" in block:
-            q["type"] = "주관식"
+        # 주관식 블록이어도 모두 객관식으로 통일(선택지 없으면 기본 보기 부여)
         lines = [ln.strip() for ln in block.split("\n") if ln.strip()]
         for line in lines:
             if line.startswith("제목:") or line.startswith("제목 :"):
@@ -480,6 +473,8 @@ def _parse_survey_questions_from_text(text: str) -> list[dict]:
                 opts = [o.strip() for o in rest.split("\n") if o.strip() and len(o.strip()) > 1]
                 q["options"] = opts[:6]
         if q["question"]:
+            if not q["options"]:
+                q["options"] = ["매우 그렇다", "그렇다", "보통", "그렇지 않다", "해당 없음"]
             questions.append(q)
     if len(questions) > 25:
         questions = questions[:25]
@@ -495,12 +490,12 @@ def _parse_survey_questions_from_text(text: str) -> list[dict]:
 
 
 def _default_survey_questions() -> list[dict]:
-    """기본 설문 문항 (Gemini 실패 시)."""
+    """기본 설문 문항 (Gemini 실패 시). 전부 객관식."""
     return [
         {"type": "객관식", "title": "가격 수용도", "question": "이 제품의 가격이 적정하다고 생각하시나요?", "options": ["전혀 그렇지 않다", "그렇지 않다", "보통", "그렇다", "매우 그렇다"]},
         {"type": "객관식", "title": "사용 편의성", "question": "이 제품의 사용 편의성에 만족하시나요?", "options": ["전혀 그렇지 않다", "그렇지 않다", "보통", "그렇다", "매우 그렇다"]},
         {"type": "객관식", "title": "브랜드 신뢰도", "question": "이 브랜드를 신뢰할 수 있다고 생각하시나요?", "options": ["전혀 그렇지 않다", "그렇지 않다", "보통", "그렇다", "매우 그렇다"]},
-        {"type": "주관식", "title": "개선 의견", "question": "이 제품에서 개선되었으면 하는 점이 있다면 자유롭게 적어주세요.", "options": []},
+        {"type": "객관식", "title": "개선 의견", "question": "이 제품에서 개선되었으면 하는 점이 있다고 생각하시나요?", "options": ["매우 그렇다", "그렇다", "보통", "그렇지 않다", "해당 없음"]},
     ]
 
 
@@ -511,19 +506,54 @@ def _build_respondent_profile(row: pd.Series, compact: bool = False) -> str:
     for c in stat_cols:
         if c in row.index and pd.notna(row.get(c)) and str(row.get(c)).strip():
             stats.append(f"{c}: {row.get(c)}")
+    # 연령 → 연령대 보조 (설문 '연령대' 문항 반영용)
+    age_val = row.get("연령")
+    if age_val is not None and str(age_val).strip():
+        try:
+            age_num = int(float(str(age_val).strip()))
+            if age_num < 20:
+                age_band = "20대 미만"
+            elif age_num < 30:
+                age_band = "20대"
+            elif age_num < 40:
+                age_band = "30대"
+            elif age_num < 50:
+                age_band = "40대"
+            elif age_num < 60:
+                age_band = "50대"
+            elif age_num < 70:
+                age_band = "60대"
+            else:
+                age_band = "70대 이상"
+            if not any("연령대" in s for s in stats):
+                stats.append(f"연령대: {age_band}")
+        except (ValueError, TypeError):
+            pass
     stats_str = ", ".join(stats) if stats else "특성 없음"
     if compact:
         persona = row.get("페르소나") or row.get("persona")
         ref = row.get("현시대 반영")
         _p = str(persona).strip() if pd.notna(persona) and str(persona).strip() else ""
         _r = str(ref).strip() if pd.notna(ref) and str(ref).strip() else ""
-        p = (_p[:80] + "…") if len(_p) > 80 else _p
-        r = (_r[:80] + "…") if len(_r) > 80 else _r
-        parts = [f"특성: {stats_str}"]
+        p = (_p[:200] + "…") if len(_p) > 200 else _p
+        r = (_r[:200] + "…") if len(_r) > 200 else _r
+        skip_keys = {"페르소나", "persona", "현시대 반영"} | set(stat_cols)
+        other_parts = []
+        for c in row.index:
+            if c in skip_keys or pd.isna(row.get(c)) or str(row.get(c)).strip() == "":
+                continue
+            other_parts.append(f"{c}={row.get(c)}")
+            if len(other_parts) >= 12:
+                break
+        other_str = ", ".join(other_parts[:12]) if other_parts else ""
+        parts = []
         if p:
-            parts.append(f"페르소나: {p}")
+            parts.append(f"[가장 중요] 페르소나(이 인물의 성격·가치관·입장): {p}")
         if r:
-            parts.append(f"현시대: {r}")
+            parts.append(f"[가장 중요] 현시대 반영(현재 시대·트렌드 반영): {r}")
+        parts.append(f"인구통계(연령·성별·소득 등 문항에 이 값 사용): {stats_str}")
+        if other_str:
+            parts.append(f"기타 특성·통계(해당 문항이 있으면 이 값에 맞는 선택지 사용): {other_str[:350]}")
         return " | ".join(parts)
     parts = []
     persona = row.get("페르소나") or row.get("persona")
@@ -554,21 +584,28 @@ def _generate_one_respondent_answers_gemini(panel_row: pd.Series, questions: lis
             opts_str = " / ".join([f"{j}:{o}" for j, o in enumerate(opts, 1)])
             q_lines.append(f"[문항{i}] {title}\n질문: {question}\n선택지(번호만 입력): {opts_str}")
         else:
-            q_lines.append(f"[문항{i}] {title}\n질문: {question} (주관식, 50자 내외 한 문장)")
+            opts_str = " / ".join([f"{j}:{o}" for j, o in enumerate(opts or ["해당 없음"], 1)])
+            q_lines.append(f"[문항{i}] {title}\n질문: {question}\n선택지(번호만 입력): {opts_str}")
     nq = min(len(questions), 25)
-    prompt = f"""당신은 아래 프로필의 가상 응답자입니다. 각 문항에 이 인물에 맞게만 답하세요. 입장 서술 없이 답변만 출력하세요.
+    prompt = f"""당신은 아래 프로필의 가상 응답자입니다. 모든 문항은 객관식이므로 선택지 번호(1,2,3,...) 하나만 입력하세요. 다음 우선순위를 지키세요.
 
 {profile}
 
-[규칙]
-- 객관식: Qn: 뒤에 반드시 선택지 번호(1,2,3,...) 하나만 입력하세요. 설명 없이 숫자만.
-- 주관식: Qn: 뒤에 50자 내외 한 문장만 입력하세요.
+[답변 우선순위 – 반드시 준수]
+1) **페르소나·현시대 반영(가장 중요)**  
+   의견·태도·만족도·선호·의도 등 심리/행동 문항은 위의 "페르소나"와 "현시대 반영"에 맞는 선택지를 고르세요.
 
-[출력 형식] 아래만 그대로 따르세요.
-Q1: (객관식이면 숫자 하나, 주관식이면 50자 내외 한 문장)
-Q2: (동일)
+2) **인구통계 문항**  
+   연령·연령대·성별·소득·교육·경제활동 등을 묻는 문항은 프로필의 "인구통계" 값에 해당하는 선택지 번호를 입력하세요.
+
+3) **인구통계 외 특징·통계(컬럼)**  
+   문항이 이 인물의 다른 특성(가구구성, 만족도, 소비경험, 자녀 유무, 직업·생활 관련 등)을 묻는다면 프로필의 "기타 특성·통계"에 있는 해당 컬럼 값에 맞는 선택지를 고르세요.
+
+[출력 형식] Q1부터 Q{nq}까지 빠짐없이 한 줄에 Qn: (숫자 하나) 형태로만 출력하세요.
+Q1: (선택지 번호)
+Q2: (선택지 번호)
 ...
-Q{nq}: (동일)
+Q{nq}: (선택지 번호)
 
 [설문 문항]
 {chr(10).join(q_lines)}
@@ -577,47 +614,43 @@ Q{nq}: (동일)
         client = GeminiClient()
         try:
             from google.genai import types
-            config = types.GenerateContentConfig(max_output_tokens=800, temperature=0.2)
+            config = types.GenerateContentConfig(max_output_tokens=1500, temperature=0.2)
             resp = client._client.models.generate_content(model=client._model, contents=prompt, config=config)
         except Exception:
             resp = client._client.models.generate_content(model=client._model, contents=prompt)
         text = (resp.text or "").strip()
         block = text.split("---답변---", 1)[-1].strip() if "---답변---" in text else text
+        # Q1: 2 형태로 된 줄을 모두 추출 (잘린 응답·형식 차이 대비)
+        q_answer_map = {}
+        for line in block.split("\n"):
+            line = line.strip()
+            m = re.match(r"^Q\s*(\d+)\s*[:\.]\s*(.+)$", line, re.IGNORECASE)
+            if m:
+                q_num = int(m.group(1))
+                q_answer_map[q_num] = m.group(2).strip()
         answers = []
         for i in range(1, nq + 1):
-            prefix = f"Q{i}:"
-            if prefix in block:
-                rest = block.split(prefix, 1)[-1]
-                next_q = rest.find("\nQ") if "\nQ" in rest else len(rest)
-                raw = rest[:next_q].strip().split("\n")[0].strip()
-                if i > len(questions):
-                    answers.append(raw[:500] if raw else "")
-                    continue
-                q = questions[i - 1]
-                typ = q.get("type", "객관식")
-                opts = q.get("options") or []
-                if typ == "객관식" and opts:
-                    # 숫자만 추출하여 선택지 매핑 (1-based)
-                    num_match = re.match(r"^(\d+)", raw.replace("①", "1").replace("②", "2").replace("③", "3").replace("④", "4").replace("⑤", "5"))
-                    if num_match:
-                        k = int(num_match.group(1))
-                        if 1 <= k <= len(opts):
-                            answers.append(opts[k - 1])
-                        else:
-                            answers.append(opts[0] if opts else raw[:200])
-                    elif raw.strip() in opts:
-                        answers.append(raw.strip())
+            raw = q_answer_map.get(i, "")
+            if i > len(questions):
+                answers.append(raw[:500] if raw else "")
+                continue
+            q = questions[i - 1]
+            typ = q.get("type", "객관식")
+            opts = q.get("options") or []
+            if typ == "객관식" and opts:
+                num_match = re.match(r"^(\d+)", (raw or "").replace("①", "1").replace("②", "2").replace("③", "3").replace("④", "4").replace("⑤", "5"))
+                if num_match:
+                    k = int(num_match.group(1))
+                    if 1 <= k <= len(opts):
+                        answers.append(opts[k - 1])
                     else:
-                        answers.append(opts[0] if opts else (raw[:200] or ""))
+                        answers.append(opts[0] if opts else raw[:200])
+                elif raw.strip() in opts:
+                    answers.append(raw.strip())
                 else:
-                    answers.append((raw[:500] if raw else "(주관식 응답)"))
+                    answers.append(opts[0] if opts else (raw[:200] or ""))
             else:
-                if i <= len(questions):
-                    q = questions[i - 1]
-                    opts = q.get("options") or []
-                    answers.append(opts[0] if q.get("type") == "객관식" and opts else "(주관식 응답)")
-                else:
-                    answers.append("")
+                answers.append((raw[:500] if raw else "(주관식 응답)"))
         return answers if len(answers) == nq else None
     except Exception:
         return None

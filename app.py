@@ -4,6 +4,7 @@ AI Social Twin - 가상인구 생성 및 조사 설계 애플리케이션
 from __future__ import annotations
 
 import os
+import re
 import traceback
 import pickle
 import json
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
 
 from core.constants import (
     APP_TITLE,
-    DB_PATH,
     AUTOSAVE_PATH,
     EXPORT_SHEET_NAME,
     EXPORT_COLUMNS,
@@ -44,7 +44,6 @@ from core.constants import (
     AXIS_LABELS,
 )
 from core.db import (
-    db_conn,
     db_init,
     db_upsert_stat,
     db_delete_stat_by_id,
@@ -366,23 +365,22 @@ def group_by_category(stats: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, A
     return out
 
 
+_SESSION_DEFAULTS = {
+    "app_started": False,
+    "generated_df": None,
+    "report": None,
+    "sigungu_list": ["전체"],
+    "selected_categories": [],
+    "selected_stats": [],
+    "last_error": None,
+    "selected_sido_label": "경상북도 (37)",
+}
+
+
 def ensure_session_state():
-    if "app_started" not in st.session_state:
-        st.session_state.app_started = False
-    if "generated_df" not in st.session_state:
-        st.session_state.generated_df = None
-    if "report" not in st.session_state:
-        st.session_state.report = None
-    if "sigungu_list" not in st.session_state:
-        st.session_state.sigungu_list = ["전체"]
-    if "selected_categories" not in st.session_state:
-        st.session_state.selected_categories = []
-    if "selected_stats" not in st.session_state:
-        st.session_state.selected_stats = []
-    if "last_error" not in st.session_state:
-        st.session_state.last_error = None
-    if "selected_sido_label" not in st.session_state:
-        st.session_state.selected_sido_label = "경상북도 (37)"
+    for key, default in _SESSION_DEFAULTS.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
 
 
 # -----------------------------
@@ -460,13 +458,19 @@ def page_data_management():
         if uploaded_file:
             file_bytes = uploaded_file.read()
             result = import_stats_from_excel_kr(sido_code, file_bytes)
-            st.success(
-                f"통계 목록 업로드 완료\n"
-                f"- 신규: {result['inserted']}\n"
-                f"- 업데이트: {result['updated']}\n"
-                f"- 오류: {result['errors']}"
-            )
-            st.rerun()
+            if not result.get("ok", True):
+                st.error(result.get("error", "업로드 실패"))
+            else:
+                st.success(
+                    f"통계 목록 업로드 완료\n"
+                    f"- 반영: {result.get('반영건수', 0)}건\n"
+                    f"- 스킵: {result.get('스킵건수', 0)}건\n"
+                    f"- 오류: {result.get('오류건수', 0)}건"
+                )
+                if result.get("오류상세"):
+                    with st.expander("오류 상세"):
+                        st.json(result["오류상세"])
+                st.rerun()
 
     # 통계 목록 표시
     st.markdown("---")
@@ -478,45 +482,81 @@ def page_data_management():
         df_stats["is_active"] = df_stats["is_active"].map({1: "Y", 0: "N"})
         st.dataframe(df_stats, use_container_width=True)
 
-    # 6축 고정 마진 통계 소스 설정
+    # 6축 고정 마진 통계 소스 설정 (저장 후에도 최신값 표시되도록 DB 직접 조회)
     st.markdown("---")
     st.subheader("6축 고정 마진 통계 소스")
-    st.markdown("각 축의 목표 마진을 제공할 통계를 선택하세요.")
+    st.markdown("각 축의 목표 마진을 제공할 통계를 선택한 뒤 **「6축 설정 저장」** 버튼을 누르세요.")
 
     active_stats = [s for s in all_stats if s["is_active"] == 1]
     if not active_stats:
         st.info("활성화된 통계가 없습니다.")
     else:
-        stat_options = {s["id"]: f"[{s['category']}] {s['name']}" for s in active_stats}
-
-        for axis_key, axis_label in [
+        # id를 int로 통일해 Supabase 반환값(문자열 등)과 비교 오류 방지
+        stat_options = {int(s["id"]): f"[{s['category']}] {s['name']}" for s in active_stats}
+        option_list = [None] + list(stat_options.keys())
+        axis_list = [
             ("sigungu", "거주지역"),
             ("gender", "성별"),
             ("age", "연령"),
             ("econ", "경제활동"),
             ("income", "소득"),
             ("edu", "교육"),
-        ]:
-            current_stat = get_cached_db_axis_margin_stats(sido_code, axis_key)
-            current_id = current_stat["stat_id"] if current_stat else None
+        ]
+
+        # 캐시를 쓰지 않고 DB에서 직접 조회 (저장 직후 새로고침 시 최신값 반영)
+        from core.db import db_get_axis_margin_stats
+        selections = {}
+        load_failed_count = 0
+        for axis_key, axis_label in axis_list:
+            current_stat = db_get_axis_margin_stats(sido_code, axis_key)
+            current_id = None
+            if current_stat and current_stat.get("stat_id") is not None:
+                try:
+                    current_id = int(current_stat["stat_id"])
+                except (TypeError, ValueError):
+                    current_id = None
+            else:
+                load_failed_count += 1
+            if current_id is not None and current_id not in stat_options:
+                current_id = None
+            default_idx = 0 if current_id is None else (option_list.index(current_id) if current_id in option_list else 0)
 
             selected_id = st.selectbox(
                 f"{axis_label} ({axis_key})",
-                options=[None] + list(stat_options.keys()),
-                format_func=lambda x: "선택 안 함" if x is None else stat_options[x],
-                index=0 if current_id is None else list(stat_options.keys()).index(current_id) + 1 if current_id in stat_options else 0,
+                options=option_list,
+                format_func=lambda x, opts=stat_options: "선택 안 함" if x is None else opts.get(x, "?"),
+                index=default_idx,
                 key=f"axis_margin_{axis_key}",
             )
+            selections[axis_key] = selected_id
 
-            if selected_id and selected_id != current_id:
-                db_upsert_axis_margin_stat(sido_code, axis_key, selected_id)
+        # DB에는 있는데 6축이 전부 조회되지 않으면 RLS(권한) 문제일 수 있음
+        if load_failed_count >= 6:
+            st.info(
+                "💡 **6축 설정이 DB에 있는데도 표시되지 않나요?** "
+                "Supabase 대시보드 → **SQL Editor**에서 프로젝트의 **docs/SUPABASE_RLS_정책_적용.sql** 내용을 실행하세요. "
+                "anon 역할에 SELECT가 허용되어야 앱에서 조회됩니다."
+            )
+
+        if st.button("6축 설정 저장", type="primary", key="save_six_axis"):
+            updated = 0
+            for axis_key, axis_label in axis_list:
+                sid = selections.get(axis_key)
+                if sid is not None:
+                    try:
+                        db_upsert_axis_margin_stat(sido_code, axis_key, int(sid))
+                        updated += 1
+                    except Exception as e:
+                        st.error(f"{axis_label} 저장 실패: {e}")
+            if updated:
                 invalidate_db_axis_margin_cache(sido_code)
-                st.success(f"{axis_label} 마진 통계 업데이트: {stat_options[selected_id]}")
+                st.success(f"6축 설정 {updated}건 저장되었습니다. 새로고침 시 유지됩니다.")
                 st.rerun()
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
+@st.cache_data(ttl=3600)
 def convert_kosis_to_distribution_cached(kosis_data_json: str, axis_key: str) -> Tuple[list, list]:
-    """KOSIS 데이터 변환 결과를 24시간 캐시. 동일 (데이터, 축)이면 재계산 생략."""
+    """KOSIS 데이터 변환 결과를 1시간 캐시. 동일 (데이터, 축)이면 재계산 생략."""
     kosis_data = json.loads(kosis_data_json) if kosis_data_json else []
     return _convert_kosis_to_distribution_impl(kosis_data, axis_key)
 
@@ -563,7 +603,6 @@ def _convert_kosis_to_distribution_impl(kosis_data, axis_key: str) -> Tuple[list
                 labels.append(gender)
                 values.append(gender_map[gender])
     elif axis_key == "age":
-        import re
         age_map = {}
         for row in kosis_data:
             if not isinstance(row, dict):
@@ -709,7 +748,6 @@ def convert_kosis_to_distribution(kosis_data, axis_key: str):
     axis_key: "sigungu", "gender", "age", "econ", "income", "edu"
     로그 기록 후 _convert_kosis_to_distribution_impl 호출.
     """
-    from datetime import datetime
     try:
         labels, probabilities = _convert_kosis_to_distribution_impl(kosis_data, axis_key)
         log_entry = {
@@ -2906,29 +2944,65 @@ def _fragment_result_tabs():
 
 
 def page_step2_results():
-    """2차 대입 결과: 날짜/시간별 기록 조회 및 데이터 보기"""
+    """2차 대입 결과: 날짜/시간별 기록 조회, 데이터 보기, 삭제(서버 파일까지 삭제). 여러 건 선택 후 일괄 삭제 가능."""
+    from utils.step2_records import list_step2_records, delete_step2_record
     st.header("2차 대입 결과")
     records = list_step2_records()
     if not records:
         st.info("아직 2차 대입 결과가 없습니다. 가상인구 생성 후 2단계에서 통계를 대입하면 여기에 저장됩니다.")
         return
-    st.caption(f"총 {len(records)}건 (날짜·시간순)")
-    for r in records:
+    st.caption(f"총 {len(records)}건 (날짜·시간순). 삭제 시 서버의 Excel·메타 파일이 함께 삭제됩니다.")
+    st.markdown("**삭제할 항목을 체크한 뒤 아래 [선택한 항목 삭제] 버튼을 누르면 한 번에 삭제됩니다.**")
+    for idx, r in enumerate(records):
         ts = r.get("timestamp", "")
         sido_name = r.get("sido_name", "")
         rows = r.get("rows", 0)
-        cols = r.get("columns_count", 0)
         excel_path = r.get("excel_path", "")
         added = r.get("added_columns", [])
-        with st.expander(f"{ts} | {sido_name} | {rows}명 | 추가 컬럼 {len(added)}개"):
+        row_label = f"{ts} | {sido_name} | {rows}명 | 추가 컬럼 {len(added)}개"
+        with st.expander(row_label):
+            st.checkbox("이 항목 삭제에 포함", key=f"step2_del_cb_{idx}")
             st.caption(f"추가된 컬럼: {', '.join(added[:8])}{' ...' if len(added) > 8 else ''}")
             try:
                 df = pd.read_excel(excel_path, engine="openpyxl")
                 st.dataframe(df.head(100), use_container_width=True, height=300)
             except Exception as e:
                 st.warning(f"데이터 로드 실패: {e}")
-            with open(excel_path, "rb") as f:
-                st.download_button("Excel 다운로드", data=f.read(), file_name=os.path.basename(excel_path), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_{ts}_{r.get('sido_code','')}")
+            col_dl, col_del = st.columns([1, 1])
+            with col_dl:
+                with open(excel_path, "rb") as f:
+                    st.download_button("Excel 다운로드", data=f.read(), file_name=os.path.basename(excel_path), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_{ts}_{r.get('sido_code','')}_{idx}")
+            with col_del:
+                if st.button("이 항목만 삭제", key=f"del_step2_{ts}_{r.get('sido_code','')}_{idx}", type="secondary"):
+                    if delete_step2_record(excel_path):
+                        st.success("해당 2차 대입 결과와 서버 파일을 삭제했습니다.")
+                    else:
+                        st.error("삭제에 실패했습니다.")
+                    st.rerun()
+
+    # 선택한 항목 일괄 삭제
+    selected_paths = []
+    for idx in range(len(records)):
+        if st.session_state.get(f"step2_del_cb_{idx}", False):
+            path = records[idx].get("excel_path", "")
+            if path and path not in selected_paths:
+                selected_paths.append(path)
+    if selected_paths:
+        if st.button("선택한 항목 삭제", type="primary", key="step2_bulk_delete"):
+            success = 0
+            fail = 0
+            for path in selected_paths:
+                if delete_step2_record(path):
+                    success += 1
+                else:
+                    fail += 1
+            if success:
+                st.success(f"선택한 {success}건을 삭제했습니다." + (f" ({fail}건 실패)" if fail else ""))
+            if fail:
+                st.error(f"{fail}건 삭제에 실패했습니다.")
+            st.rerun()
+    else:
+        st.caption("삭제할 항목을 위에서 체크하면 [선택한 항목 삭제] 버튼이 나타납니다.")
 
 
 
@@ -3454,133 +3528,93 @@ def _ensure_generate_modules() -> None:
 
 
 def _run_page_vdb():
-    ph = st.session_state.get("_main_placeholder")
-    if ph is not None:
-        with ph.container():
-            st.title(APP_TITLE)
-            from pages.virtual_population_db import page_virtual_population_db
-            page_virtual_population_db()
-    else:
-        st.title(APP_TITLE)
-        from pages.virtual_population_db import page_virtual_population_db
-        page_virtual_population_db()
+    from pages.virtual_population_db import page_virtual_population_db
+    st.title(APP_TITLE)
+    page_virtual_population_db()
 
 
 def _run_page_generate():
-    ph = st.session_state.get("_main_placeholder")
-    def _content():
-        st.title(APP_TITLE)
-        try:
-            _ensure_generate_modules()
-        except Exception as e:
-            st.error("가상인구 생성 모듈 로드 실패: " + str(e))
-            st.code(traceback.format_exc())
-        else:
-            gen_tabs = st.tabs(["데이터 관리", "생성", "2차 대입 결과", "통계 대입 로그"])
-            with gen_tabs[0]:
-                page_data_management()
-            with gen_tabs[1]:
-                page_generate()
-            with gen_tabs[2]:
-                page_step2_results()
-            with gen_tabs[3]:
-                page_stat_assignment_log()
-    if ph is not None:
-        with ph.container():
-            _content()
+    st.title(APP_TITLE)
+    try:
+        _ensure_generate_modules()
+    except Exception as e:
+        st.error("가상인구 생성 모듈 로드 실패: " + str(e))
+        st.code(traceback.format_exc())
     else:
-        _content()
+        gen_tabs = st.tabs(["데이터 관리", "생성", "2차 대입 결과", "통계 대입 로그"])
+        with gen_tabs[0]:
+            page_data_management()
+        with gen_tabs[1]:
+            page_generate()
+        with gen_tabs[2]:
+            page_step2_results()
+        with gen_tabs[3]:
+            page_stat_assignment_log()
 
 
 def _run_page_survey():
-    st.title(APP_TITLE)
     from pages.survey import page_survey
+    st.title(APP_TITLE)
     page_survey()
 
 
 def _run_page_conjoint():
-    ph = st.session_state.get("_main_placeholder")
-    if ph is not None:
-        with ph.container():
-            st.title(APP_TITLE)
-            from pages.result_analysis_conjoint import page_conjoint_analysis
-            page_conjoint_analysis()
-    else:
-        st.title(APP_TITLE)
-        from pages.result_analysis_conjoint import page_conjoint_analysis
-        page_conjoint_analysis()
+    from pages.result_analysis_conjoint import page_conjoint_analysis
+    st.title(APP_TITLE)
+    page_conjoint_analysis()
 
 
 def _run_page_psm():
-    st.title(APP_TITLE)
     from pages.result_analysis_psm import page_psm
+    st.title(APP_TITLE)
     page_psm()
 
 
 def _run_page_bass():
-    ph = st.session_state.get("_main_placeholder")
-    if ph is not None:
-        with ph.container():
-            st.title(APP_TITLE)
-            from pages.result_analysis_bass import page_bass
-            page_bass()
-    else:
-        st.title(APP_TITLE)
-        from pages.result_analysis_bass import page_bass
-        page_bass()
+    from pages.result_analysis_bass import page_bass
+    st.title(APP_TITLE)
+    page_bass()
 
 
 def _run_page_statcheck():
-    ph = st.session_state.get("_main_placeholder")
-    if ph is not None:
-        with ph.container():
-            st.title(APP_TITLE)
-            from pages.result_analysis_statcheck import page_statcheck
-            page_statcheck()
-    else:
-        st.title(APP_TITLE)
-        from pages.result_analysis_statcheck import page_statcheck
-        page_statcheck()
+    from pages.result_analysis_statcheck import page_statcheck
+    st.title(APP_TITLE)
+    page_statcheck()
 
 
 def _run_page_bg_removal():
-    ph = st.session_state.get("_main_placeholder")
-    def _content():
-        st.title(APP_TITLE)
-        try:
-            from pages.utils_background_removal import page_photo_background_removal
-            page_photo_background_removal()
-        except Exception as e:
-            st.markdown("## 사진 배경제거")
-            st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_background_removal.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
-            st.caption(str(e))
-    if ph is not None:
-        with ph.container():
-            _content()
+    try:
+        from pages.utils_background_removal import page_photo_background_removal
+    except Exception as e:
+        page_photo_background_removal = None
+        _bg_err = e
+    st.title(APP_TITLE)
+    if page_photo_background_removal is not None:
+        page_photo_background_removal()
     else:
-        _content()
+        st.markdown("## 사진 배경제거")
+        st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_background_removal.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
+        st.caption(str(_bg_err))
 
 
 def _run_page_clothing():
-    ph = st.session_state.get("_main_placeholder")
-    def _content():
-        st.title(APP_TITLE)
-        try:
-            from pages.utils_clothing_change import page_photo_clothing_change
-            page_photo_clothing_change()
-        except Exception as e:
-            st.markdown("## 사진 옷 변경")
-            st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_clothing_change.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
-            st.caption(str(e))
-    if ph is not None:
-        with ph.container():
-            _content()
+    try:
+        from pages.utils_clothing_change import page_photo_clothing_change
+    except Exception as e:
+        page_photo_clothing_change = None
+        _cloth_err = e
+    st.title(APP_TITLE)
+    if page_photo_clothing_change is not None:
+        page_photo_clothing_change()
     else:
-        _content()
+        st.markdown("## 사진 옷 변경")
+        st.warning("이 페이지는 JavaScript/Streamlit 모듈로 구성됩니다. 현재 `pages/utils_clothing_change.py` 가 Python 모듈이 아닌 경우 동작하지 않습니다.")
+        st.caption(str(_cloth_err))
 
 
 def main():
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    # set_page_config는 run.py에서 이미 1회 호출됨. 여기서 다시 호출하면 Streamlit Cloud 등에서 "can only be called once" 오류로 로딩 실패할 수 있음.
+    # st.set_page_config(page_title=APP_TITLE, layout="wide")
     
     # 페이지 전환 시 이전 콘텐츠 잔상(ghosting) 방지 (st.navigation 메뉴는 사이드바에 그대로 표시)
     st.markdown("""
@@ -3589,7 +3623,7 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    # DB 초기화는 세션당 1회만 실행 (재실행/페이지 이동 시 스피너·초기화 생략)
+    # DB 초기화: Supabase 연결 검증 (세션당 1회 성공 시만 플래그 설정)
     if not st.session_state.get("_db_initialized", False):
         with st.spinner("준비 중…"):
             try:
@@ -3597,19 +3631,23 @@ def main():
                 st.session_state.pop("db_init_error", None)
                 st.session_state["_db_initialized"] = True
             except Exception as e:
-                st.session_state.db_init_error = str(e)
+                st.session_state["db_init_error"] = str(e)
     ensure_session_state()
 
+    # 엄격한 단일 컨테이너: 모든 메인 UI는 이 플레이스홀더 안에서만 렌더 (잔상 방지)
+    if "_main_placeholder" not in st.session_state:
+        st.session_state["_main_placeholder"] = st.empty()
+    main_container = st.session_state["_main_placeholder"]
+
     if not st.session_state.get("app_started", False):
-        render_landing()
-        if st.session_state.get("db_init_error"):
-            st.error("DB 초기화 실패 (배포 환경에서는 정상일 수 있음): " + st.session_state.db_init_error)
+        main_container.empty()
+        with main_container.container():
+            render_landing()
+            if st.session_state.get("db_init_error"):
+                st.error("Supabase 설정을 확인해주세요. " + st.session_state["db_init_error"])
         return
 
-    # Single Container Pattern: 페이지 전환/새로고침 시 이전 콘텐츠 잔상(ghosting) 최소화
-    main_placeholder = st.empty()
-    st.session_state["_main_placeholder"] = main_placeholder
-
+    # 페이지 전환 시 컨테이너는 각 _run_page_* 내부에서 empty() 후 채움
     # st.navigation: 페이지 전환 시 st.rerun() 없이 전환되어 깜빡임·지연 최소화
     page_vdb = st.Page(_run_page_vdb, title="가상인구 DB", default=True)
     page_gen = st.Page(_run_page_generate, title="가상인구 생성")
@@ -3630,6 +3668,8 @@ def main():
 
 
 if __name__ == "__main__":
+    import streamlit as _st
+    _st.set_page_config(page_title=APP_TITLE, layout="wide")
     try:
         main()
     except Exception as e:

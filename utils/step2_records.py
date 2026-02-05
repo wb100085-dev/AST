@@ -81,3 +81,33 @@ def load_step2_record(excel_path: str) -> pd.DataFrame:
         return pd.read_excel(excel_path, engine="openpyxl")
     except Exception as e:
         raise Exception(f"데이터 로드 실패: {e}")
+
+
+def delete_step2_record(excel_path: str) -> bool:
+    """2차 대입 결과 한 건 삭제: 서버의 .xlsx 및 대응 .json 파일 삭제 후 목록 캐시 무효화."""
+    if not excel_path or not os.path.isfile(excel_path):
+        return False
+    try:
+        base, _ = os.path.splitext(excel_path)
+        meta_path = base + ".json"
+        ok = True
+        if os.path.isfile(excel_path):
+            try:
+                os.remove(excel_path)
+            except OSError:
+                ok = False
+        if meta_path != excel_path and os.path.isfile(meta_path):
+            try:
+                os.remove(meta_path)
+            except OSError:
+                pass
+        if ok:
+            try:
+                import streamlit as st
+                if _cached_list_fn is not None and hasattr(_cached_list_fn, "clear"):
+                    _cached_list_fn.clear()
+            except Exception:
+                pass
+        return ok
+    except Exception:
+        return False

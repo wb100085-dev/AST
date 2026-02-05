@@ -1,348 +1,132 @@
 """
-AI Social Twin - DB 레이어 및 Excel round-trip
-app.py에서 분리
+AI Social Twin - DB 레이어 (Supabase PostgreSQL)
+로컬/배포 환경 간 데이터 공유를 위해 Supabase 사용.
 """
-import os
-import sqlite3
+import base64
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
 
-from core.constants import (
-    DB_PATH,
-    EXPORT_SHEET_NAME,
-    EXPORT_COLUMNS,
-)
+from core.constants import EXPORT_SHEET_NAME, EXPORT_COLUMNS
+from core.supabase_client import get_supabase
 
 
-@st.cache_resource
 def db_conn():
-    """세션 동안 재사용되는 DB 연결. 캐시된 연결이므로 호출부에서 close()하지 않음."""
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Supabase 사용 시 호환용. get_supabase() 반환 (cursor 없음)."""
+    return get_supabase()
 
 
 def delete_virtual_population_db_by_sido(sido_code: str) -> bool:
-    """해당 시도 가상인구 DB 전체 삭제(초기화). 쓰기용 단일 연결 사용으로 lock 완화(Streamlit Cloud 등)."""
+    """해당 시도 가상인구 DB 전체 삭제(초기화)."""
     try:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        conn = sqlite3.connect(DB_PATH, timeout=30.0)
-        try:
-            conn.execute("DELETE FROM virtual_population_db WHERE sido_code = ?", (sido_code,))
-            conn.commit()
-            return True
-        finally:
-            conn.close()
+        sb = get_supabase()
+        sb.table("virtual_population_db").delete().eq("sido_code", sido_code).execute()
+        return True
     except Exception:
         return False
 
 
 def db_init():
-    conn = db_conn()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_profiles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            sido_name TEXT NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_sido_profiles_code
-        ON sido_profiles(sido_code)
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_axis_weights (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            w_sigungu REAL NOT NULL DEFAULT 1.0,
-            w_gender REAL NOT NULL DEFAULT 1.0,
-            w_age REAL NOT NULL DEFAULT 1.0,
-            w_econ REAL NOT NULL DEFAULT 1.0,
-            w_income REAL NOT NULL DEFAULT 1.0,
-            w_edu REAL NOT NULL DEFAULT 1.0,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(sido_code)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            category TEXT NOT NULL,
-            name TEXT NOT NULL,
-            url TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-        """
-    )
-    cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_stats_sido_category_name
-        ON stats(sido_code, category, name)
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_weight_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            stat_id INTEGER NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(sido_code, stat_id)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_axis_margin_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            axis_key TEXT NOT NULL,
-            stat_id INTEGER NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            UNIQUE(sido_code, axis_key)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sido_templates (
-            sido_code TEXT PRIMARY KEY,
-            filename TEXT NOT NULL,
-            file_blob BLOB NOT NULL,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS virtual_population_db (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sido_code TEXT NOT NULL,
-            sido_name TEXT NOT NULL,
-            record_timestamp TEXT NOT NULL,
-            record_excel_path TEXT NOT NULL,
-            data_json TEXT NOT NULL,
-            added_at TEXT DEFAULT (datetime('now'))
-        )
-        """
-    )
-
-    # === 성능: stats 조회(WHERE/ORDER BY)용 인덱스 ===
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_stats_is_active_order
-        ON stats(is_active, sido_code, category, name)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_stats_sido_active_cat
-        ON stats(sido_code, is_active, category, name)
-        """
-    )
-
-    # === 성능: virtual_population_db 조회(WHERE/ORDER BY)용 인덱스 (pages에서 사용) ===
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_vpd_sido_added
-        ON virtual_population_db(sido_code, added_at)
-        """
-    )
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_vpd_sido_ts_path
-        ON virtual_population_db(sido_code, record_timestamp, record_excel_path)
-        """
-    )
-
-    conn.commit()
+    """Supabase 연결만 검증(즉시 연결 시도). 테이블은 docs/SUPABASE_CREATE_TABLES.sql 로 생성."""
+    get_supabase()
 
 
 @st.cache_data(ttl=60)
 def db_list_stats_by_sido(sido_code: str, active_only: bool = False) -> List[Dict[str, Any]]:
-    conn = db_conn()
-    cur = conn.cursor()
-    # 모든 분기는 동등 조건(=)만 사용 → 인덱스 활용 가능. LIKE/함수 래핑 없음.
-    if sido_code == "00":
-        if active_only:
-            # idx_stats_is_active_order (is_active, sido_code, category, name)
-            cur.execute("SELECT * FROM stats WHERE is_active=1 ORDER BY sido_code, category, name")
-        else:
-            # ux_stats_sido_category_name (sido_code, category, name)
-            cur.execute("SELECT * FROM stats ORDER BY sido_code, category, name")
-    else:
-        if active_only:
-            # idx_stats_sido_active_cat (sido_code, is_active, category, name)
-            cur.execute(
-                "SELECT * FROM stats WHERE sido_code=? AND is_active=1 ORDER BY category, name",
-                (sido_code,),
-            )
-        else:
-            # ux_stats_sido_category_name (sido_code, category, name)
-            cur.execute("SELECT * FROM stats WHERE sido_code=? ORDER BY category, name", (sido_code,))
-    rows = [dict(r) for r in cur.fetchall()]
-    return rows
+    sb = get_supabase()
+    q = sb.table("stats").select("*")
+    if sido_code != "00":
+        q = q.eq("sido_code", sido_code)
+    if active_only:
+        q = q.eq("is_active", 1)
+    q = q.order("sido_code").order("category").order("name")
+    r = q.execute()
+    rows = r.data or []
+    return [dict(x) for x in rows]
 
 
 def db_upsert_stat(sido_code: str, category: str, name: str, url: str, is_active: int = 1):
-    conn = db_conn()
-    cur = conn.cursor()
-
+    sb = get_supabase()
     category = str(category).strip()
     name = str(name).strip()
     url = str(url).strip()
     is_active = 1 if int(is_active) != 0 else 0
-
-    cur.execute(
-        """
-        INSERT INTO stats (sido_code, category, name, url, is_active)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(sido_code, category, name) DO UPDATE SET
-            url=excluded.url,
-            is_active=excluded.is_active,
-            updated_at=datetime('now')
-        """,
-        (sido_code, category, name, url, is_active),
-    )
-    conn.commit()
+    existing = sb.table("stats").select("id").eq("sido_code", sido_code).eq("category", category).eq("name", name).limit(1).execute()
+    if existing.data and len(existing.data) > 0:
+        sb.table("stats").update({"url": url, "is_active": is_active, "updated_at": datetime.utcnow().isoformat()}).eq("id", existing.data[0]["id"]).execute()
+    else:
+        sb.table("stats").insert({"sido_code": sido_code, "category": category, "name": name, "url": url, "is_active": is_active}).execute()
 
 
 def db_delete_stat_by_id(stat_id: int):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM stats WHERE id=?", (int(stat_id),))
-    conn.commit()
+    get_supabase().table("stats").delete().eq("id", int(stat_id)).execute()
 
 
 def db_update_stat_by_id(stat_id: int, category: str, name: str, url: str, is_active: int):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE stats
-        SET category=?, name=?, url=?, is_active=?, updated_at=datetime('now')
-        WHERE id=?
-        """,
-        (category.strip(), name.strip(), url.strip(), int(is_active), int(stat_id)),
-    )
-    conn.commit()
+    get_supabase().table("stats").update({
+        "category": category.strip(),
+        "name": name.strip(),
+        "url": url.strip(),
+        "is_active": int(is_active),
+        "updated_at": datetime.utcnow().isoformat(),
+    }).eq("id", int(stat_id)).execute()
 
 
-@st.cache_data(ttl=60)
 def db_get_axis_margin_stats(sido_code: str, axis_key: str) -> Optional[Dict[str, Any]]:
-    """특정 시도/축의 마진 통계 소스 조회"""
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, sido_code, axis_key, stat_id, created_at, updated_at
-        FROM sido_axis_margin_stats
-        WHERE sido_code = ? AND axis_key = ?
-        """,
-        (sido_code, axis_key),
-    )
-    row = cur.fetchone()
-    return dict(row) if row else None
+    """6축 마진 설정 조회. 캐시 없이 매번 DB 조회 (저장 후 즉시 반영)."""
+    r = get_supabase().table("sido_axis_margin_stats").select("*").eq("sido_code", sido_code).eq("axis_key", axis_key).limit(1).execute()
+    if r.data and len(r.data) > 0:
+        return dict(r.data[0])
+    return None
 
 
-@st.cache_data(ttl=60)
 def db_get_six_axis_stat_ids(sido_code: str) -> set:
-    """6축 마진에 사용 중인 통계 ID 집합 (2단계에서 제외할 대상)"""
     axis_keys = ["sigungu", "gender", "age", "econ", "income", "edu"]
     ids = set()
     for axis_key in axis_keys:
         row = db_get_axis_margin_stats(sido_code, axis_key)
-        if row and row.get("stat_id"):
+        if row and row.get("stat_id") is not None:
             ids.add(int(row["stat_id"]))
     return ids
 
 
 def db_upsert_axis_margin_stat(sido_code: str, axis_key: str, stat_id: int):
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO sido_axis_margin_stats (sido_code, axis_key, stat_id)
-        VALUES (?, ?, ?)
-        ON CONFLICT(sido_code, axis_key) DO UPDATE SET
-            stat_id=excluded.stat_id,
-            updated_at=datetime('now')
-        """,
-        (sido_code, axis_key, int(stat_id)),
-    )
-    conn.commit()
+    """6축 마진 통계 소스 저장. 실패 시 예외 발생."""
+    sb = get_supabase()
+    existing = sb.table("sido_axis_margin_stats").select("id").eq("sido_code", sido_code).eq("axis_key", axis_key).limit(1).execute()
+    payload = {"sido_code": str(sido_code), "axis_key": str(axis_key), "stat_id": int(stat_id)}
+    if existing.data and len(existing.data) > 0:
+        sb.table("sido_axis_margin_stats").update({**payload, "updated_at": datetime.utcnow().isoformat()}).eq("id", existing.data[0]["id"]).execute()
+    else:
+        sb.table("sido_axis_margin_stats").insert(payload).execute()
 
 
 def db_upsert_template(sido_code: str, filename: str, file_bytes: bytes):
-    """템플릿 저장/업데이트"""
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO sido_templates (sido_code, filename, file_blob)
-        VALUES (?, ?, ?)
-        ON CONFLICT(sido_code) DO UPDATE SET
-            filename = excluded.filename,
-            file_blob = excluded.file_blob,
-            updated_at = datetime('now')
-        """,
-        (sido_code, filename, file_bytes),
-    )
-    conn.commit()
+    """템플릿 저장/업데이트. file_blob는 base64 TEXT로 저장."""
+    b64 = base64.b64encode(file_bytes).decode("ascii")
+    sb = get_supabase()
+    existing = sb.table("sido_templates").select("sido_code").eq("sido_code", sido_code).limit(1).execute()
+    row = {"sido_code": sido_code, "filename": filename, "file_blob": b64}
+    if existing.data and len(existing.data) > 0:
+        sb.table("sido_templates").update({"filename": filename, "file_blob": b64, "updated_at": datetime.utcnow().isoformat()}).eq("sido_code", sido_code).execute()
+    else:
+        sb.table("sido_templates").insert(row).execute()
 
 
 @st.cache_data(ttl=60)
 def db_get_template(sido_code: str) -> Optional[Dict[str, Any]]:
-    """템플릿 조회"""
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT filename, file_blob, updated_at
-        FROM sido_templates
-        WHERE sido_code = ?
-        """,
-        (sido_code,),
-    )
-    row = cur.fetchone()
-
-    if row:
-        return {
-            "filename": row["filename"],
-            "bytes": row["file_blob"],
-            "updated_at": row["updated_at"],
-        }
-    return None
+    r = get_supabase().table("sido_templates").select("filename, file_blob, updated_at").eq("sido_code", sido_code).limit(1).execute()
+    if not r.data or len(r.data) == 0:
+        return None
+    row = r.data[0]
+    try:
+        file_bytes = base64.b64decode(row["file_blob"])
+    except Exception:
+        return None
+    return {"filename": row["filename"], "bytes": file_bytes, "updated_at": row["updated_at"]}
 
 
 def build_stats_template_xlsx_kr() -> bytes:
@@ -377,7 +161,6 @@ def build_stats_export_xlsx_kr(sido_code: str) -> bytes:
                 "활성여부": df["is_active"].astype(int),
             }
         )
-
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
         out_df.to_excel(writer, index=False, sheet_name=EXPORT_SHEET_NAME)
@@ -392,16 +175,13 @@ def get_export_filename(prefix: str) -> str:
 def import_stats_from_excel_kr(sido_code: str, file_bytes: bytes) -> Dict[str, Any]:
     xdf = pd.read_excel(BytesIO(file_bytes), sheet_name=EXPORT_SHEET_NAME)
     xdf.columns = [str(c).strip() for c in xdf.columns]
-
     required = {"카테고리", "통계명", "URL"}
     missing = required - set(xdf.columns)
     if missing:
         return {"ok": False, "error": f"필수 컬럼 누락: {sorted(list(missing))} (시트명 '{EXPORT_SHEET_NAME}' 확인 필요)"}
-
     if "활성여부" not in xdf.columns:
         xdf["활성여부"] = 1
     xdf["활성여부"] = xdf["활성여부"].fillna(1)
-
     reflected, skipped, errors = 0, 0, []
     for i, row in xdf.iterrows():
         try:
@@ -411,19 +191,16 @@ def import_stats_from_excel_kr(sido_code: str, file_bytes: bytes) -> Dict[str, A
             if not category or not name or not url:
                 skipped += 1
                 continue
-
             act = row.get("활성여부", 1)
             try:
                 act = int(float(act))
             except Exception:
                 act = 1
             act = 1 if act != 0 else 0
-
             db_upsert_stat(sido_code, category, name, url, act)
             reflected += 1
         except Exception as e:
             errors.append({"행": int(i) + 2, "오류": str(e)})
-
     try:
         from core.session_cache import invalidate_db_stats_cache
         invalidate_db_stats_cache(sido_code)
@@ -433,7 +210,6 @@ def import_stats_from_excel_kr(sido_code: str, file_bytes: bytes) -> Dict[str, A
 
 
 def _vpd_record_has_persona_and_contemporary(data_json: bytes | str) -> bool:
-    """data_json에 페르소나·현시대 반영이 한 건 이상 있는지 여부."""
     try:
         data = pd.read_json(data_json, orient="records") if isinstance(data_json, str) else pd.read_json(BytesIO(data_json), orient="records")
         if data.empty:
@@ -449,102 +225,81 @@ def _vpd_record_has_persona_and_contemporary(data_json: bytes | str) -> bool:
 
 
 def delete_virtual_population_db_record(record_id: int) -> bool:
-    """virtual_population_db에서 id로 한 건 삭제. 성공 시 True. 삭제 후 캐시 무효화는 호출부에서 처리."""
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM virtual_population_db WHERE id = ?", (int(record_id),))
-    conn.commit()
-    return cur.rowcount > 0
+    try:
+        r = get_supabase().table("virtual_population_db").delete().eq("id", int(record_id)).execute()
+        return True
+    except Exception:
+        return False
 
 
 def list_virtual_population_db_records_all(sido_code: str) -> List[Dict[str, Any]]:
-    """해당 시도의 virtual_population_db 전체 목록 반환(페르소나 필터 없음). 삭제 UI용. id, record_timestamp, record_excel_path, rows."""
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, sido_code, sido_name, record_timestamp, record_excel_path, data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-        (sido_code,),
-    )
-    rows = cur.fetchall()
+    r = get_supabase().table("virtual_population_db").select("id, sido_code, sido_name, record_timestamp, record_excel_path, data_json").eq("sido_code", sido_code).order("added_at").execute()
     out = []
-    for row in rows:
+    for row in (r.data or []):
         try:
-            df = pd.read_json(row[5], orient="records")
+            df = pd.read_json(row["data_json"], orient="records")
             n_rows = len(df)
         except Exception:
             n_rows = 0
         out.append({
-            "id": row[0],
-            "sido_code": row[1],
-            "sido_name": row[2],
-            "record_timestamp": row[3],
-            "record_excel_path": row[4] or "",
+            "id": row["id"],
+            "sido_code": row["sido_code"],
+            "sido_name": row["sido_name"],
+            "record_timestamp": row["record_timestamp"],
+            "record_excel_path": row.get("record_excel_path") or "",
             "rows": n_rows,
         })
     return out
 
 
+def list_virtual_population_db_data_jsons(sido_code: str) -> List[Tuple[int, str]]:
+    """해당 시도 가상인구 DB 레코드의 (id, data_json) 목록 반환 (added_at 순)."""
+    r = get_supabase().table("virtual_population_db").select("id, data_json").eq("sido_code", sido_code).order("added_at").execute()
+    return [(row["id"], row["data_json"]) for row in (r.data or [])]
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def list_virtual_population_db_records(sido_code: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    가상인구 DB에서 페르소나·현시대 반영이 된 목록만 반환.
-    sido_code가 있으면 해당 시도만, 없으면 전부.
-    캐시 오염 방지를 위해 복사본 리스트 반환.
-    """
-    conn = db_conn()
-    cur = conn.cursor()
+    sb = get_supabase()
+    q = sb.table("virtual_population_db").select("id, sido_code, sido_name, record_timestamp, record_excel_path, data_json")
     if sido_code:
-        cur.execute(
-            "SELECT id, sido_code, sido_name, record_timestamp, record_excel_path, data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-            (sido_code,),
-        )
-    else:
-        cur.execute(
-            "SELECT id, sido_code, sido_name, record_timestamp, record_excel_path, data_json FROM virtual_population_db ORDER BY added_at",
-        )
-    rows = cur.fetchall()
-
+        q = q.eq("sido_code", sido_code)
+    q = q.order("added_at")
+    r = q.execute()
     out = []
-    for row in rows:
-        id_, sc, sido_name, record_ts, excel_path, data_json = row[0], row[1], row[2], row[3], row[4], row[5]
-        if not _vpd_record_has_persona_and_contemporary(data_json):
+    for row in (r.data or []):
+        if not _vpd_record_has_persona_and_contemporary(row["data_json"]):
             continue
         try:
-            df = pd.read_json(data_json, orient="records")
+            df = pd.read_json(row["data_json"], orient="records")
             out.append({
-                "id": id_,
-                "sido_code": sc,
-                "sido_name": sido_name,
-                "record_timestamp": record_ts,
-                "record_excel_path": excel_path or "",
+                "id": row["id"],
+                "sido_code": row["sido_code"],
+                "sido_name": row["sido_name"],
+                "record_timestamp": row["record_timestamp"],
+                "record_excel_path": row.get("record_excel_path") or "",
                 "rows": len(df),
                 "columns_count": len(df.columns),
             })
         except Exception:
             continue
-    return [dict(item) for item in out]
+    return out
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_virtual_population_db_record_by_id(record_id: int) -> Optional[Dict[str, Any]]:
-    """가상인구 DB에서 id로 한 건 조회. DataFrame과 메타 반환. 캐시 오염 방지를 위해 df 복사본 반환."""
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, sido_code, sido_name, record_timestamp, record_excel_path, data_json FROM virtual_population_db WHERE id = ?",
-        (int(record_id),),
-    )
-    row = cur.fetchone()
-    if not row:
+    r = get_supabase().table("virtual_population_db").select("*").eq("id", int(record_id)).limit(1).execute()
+    if not r.data or len(r.data) == 0:
         return None
+    row = r.data[0]
     try:
-        df = pd.read_json(row[5], orient="records")
+        df = pd.read_json(row["data_json"], orient="records")
         return {
-            "id": row[0],
-            "sido_code": row[1],
-            "sido_name": row[2],
-            "record_timestamp": row[3],
-            "record_excel_path": row[4],
+            "id": row["id"],
+            "sido_code": row["sido_code"],
+            "sido_name": row["sido_name"],
+            "record_timestamp": row["record_timestamp"],
+            "record_excel_path": row.get("record_excel_path"),
             "df": df.copy(),
             "rows": len(df),
             "columns_count": len(df.columns),
@@ -555,25 +310,13 @@ def get_virtual_population_db_record_by_id(record_id: int) -> Optional[Dict[str,
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_virtual_population_db_combined_df(sido_code: str):
-    """
-    해당 시도의 가상인구 DB 중 페르소나·현시대 반영된 기록을 모두 합쳐 하나의 DataFrame으로 반환.
-    없으면 None. 캐시 오염 방지를 위해 복사본 반환.
-    """
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, sido_code, sido_name, record_timestamp, data_json FROM virtual_population_db WHERE sido_code = ? ORDER BY added_at",
-        (sido_code,),
-    )
-    rows = cur.fetchall()
-
+    r = get_supabase().table("virtual_population_db").select("id, sido_code, sido_name, record_timestamp, data_json").eq("sido_code", sido_code).order("added_at").execute()
     dfs = []
-    for row in rows:
-        data_json = row[4]
-        if not _vpd_record_has_persona_and_contemporary(data_json):
+    for row in (r.data or []):
+        if not _vpd_record_has_persona_and_contemporary(row["data_json"]):
             continue
         try:
-            df = pd.read_json(data_json, orient="records")
+            df = pd.read_json(row["data_json"], orient="records")
             if "식별NO" in df.columns:
                 df = df.drop(columns=["식별NO"])
             if "페르소나" not in df.columns:
@@ -583,11 +326,9 @@ def get_virtual_population_db_combined_df(sido_code: str):
             dfs.append(df)
         except Exception:
             continue
-
     if not dfs:
         return None
     combined = pd.concat(dfs, ignore_index=True)
-    # 행 단위: 페르소나·현시대 반영이 모두 채워진 행만 포함
     if "페르소나" in combined.columns and "현시대 반영" in combined.columns:
         persona_ok = combined["페르소나"].fillna("").astype(str).str.strip() != ""
         cont_ok = combined["현시대 반영"].fillna("").astype(str).str.strip() != ""
@@ -599,31 +340,56 @@ def get_virtual_population_db_combined_df(sido_code: str):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_sido_vdb_stats() -> Dict[str, Dict[str, Any]]:
-    """
-    시도별 가상인구 DB 통계. 전국(00) 제외.
-    반환: { sido_code: { "sido_name", "vdb_count" } }
-    vdb_count = 해당 시도 virtual_population_db의 모든 기록에서의 총 인원 수(행 수 합계).
-    캐시 오염 방지를 위해 복사본 반환.
-    """
-    conn = db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT sido_code, sido_name, data_json FROM virtual_population_db"
-    )
-    rows = cur.fetchall()
-
-    out: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        sido_code = row[0]
-        sido_name = row[1]
+    r = get_supabase().table("virtual_population_db").select("sido_code, sido_name, data_json").execute()
+    out = {}
+    for row in (r.data or []):
+        sido_code = row["sido_code"]
         if sido_code == "00":
             continue
         try:
-            df = pd.read_json(row[2], orient="records")
+            df = pd.read_json(row["data_json"], orient="records")
             n = len(df)
         except Exception:
             n = 0
         if sido_code not in out:
-            out[sido_code] = {"sido_name": sido_name, "vdb_count": 0}
+            out[sido_code] = {"sido_name": row["sido_name"], "vdb_count": 0}
         out[sido_code]["vdb_count"] = out[sido_code]["vdb_count"] + n
-    return {k: dict(v) for k, v in out.items()}
+    return out
+
+
+def insert_virtual_population_db(sido_code: str, sido_name: str, record_timestamp: str, record_excel_path: str, data_json: str) -> Optional[int]:
+    """가상인구 DB 한 건 INSERT. 반환: id 또는 None."""
+    try:
+        r = get_supabase().table("virtual_population_db").insert({
+            "sido_code": sido_code,
+            "sido_name": sido_name,
+            "record_timestamp": record_timestamp,
+            "record_excel_path": record_excel_path,
+            "data_json": data_json,
+        }).execute()
+        if r.data and len(r.data) > 0:
+            return r.data[0].get("id")
+    except Exception:
+        pass
+    return None
+
+
+def update_virtual_population_db_data_json(record_id: int, data_json: str):
+    """virtual_population_db 레코드의 data_json만 UPDATE."""
+    get_supabase().table("virtual_population_db").update({"data_json": data_json}).eq("id", int(record_id)).execute()
+
+
+def get_virtual_population_db_data_json(record_id: int) -> Optional[str]:
+    """virtual_population_db 레코드의 data_json만 조회."""
+    r = get_supabase().table("virtual_population_db").select("data_json").eq("id", int(record_id)).limit(1).execute()
+    if r.data and len(r.data) > 0:
+        return r.data[0].get("data_json")
+    return None
+
+
+def find_virtual_population_db_id(sido_code: str, record_timestamp: str, record_excel_path: str) -> Optional[int]:
+    """sido_code, record_timestamp, record_excel_path 로 id 조회."""
+    r = get_supabase().table("virtual_population_db").select("id").eq("sido_code", sido_code).eq("record_timestamp", record_timestamp).eq("record_excel_path", record_excel_path).limit(1).execute()
+    if r.data and len(r.data) > 0:
+        return r.data[0].get("id")
+    return None
