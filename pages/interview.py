@@ -7,11 +7,19 @@ from pages.common import apply_common_styles, render_common_input_form
 from core.constants import SIDO_LABEL_TO_CODE, SIDO_CODE_TO_NAME
 from core.db import get_virtual_population_db_combined_df
 from core.session_cache import get_sido_master
+from utils.gemini_client import GeminiClient
 
 
 def page_interview():
     """심층면접 페이지 (Process 2 - FGI/IDI)"""
     apply_common_styles()
+
+    # 상단 내비게이션: 이전 페이지
+    _, col_nav = st.columns([1, 0.2])
+    with col_nav:
+        if st.button("이전 페이지", key="interview_back_to_prev", type="secondary", use_container_width=True):
+            st.switch_page("pages/survey.py")
+    st.markdown("---")
 
     # 지역 선택 (가상인구 DB 페이지와 동일)
     sido_master = get_sido_master()
@@ -95,78 +103,88 @@ def page_interview():
         </div>
         """, unsafe_allow_html=True)
         
+        # 인터뷰 방식 상세 정보 표 (Markdown 표)
+        st.markdown("**인터뷰 방식 안내**")
+        st.markdown("""
+| 방식 | 설명 | 특징 |
+|---|---|---|
+| **FGI** (Focus Group Interview) | 진행자(Moderator) 주도로 소수의 참여자(6~12인)를 대상으로 특정 주제에 대해 인터뷰를 진행하여 정보를 수집하는 방식 | - 진행자가 사전에 준비된 가이드라인에 따라 질문을 던지고 답변을 청취<br>- 다수의 의견을 효율적으로 수집 가능, 공통된 인식/패턴 파악 유리<br>- 진행자와 참여자 간의 문답이 주를 이룸 |
+| **FGD** (Focus Group Discussion) | FGI와 유사하나, 진행자의 개입을 최소화하고 참여자 간의 자유로운 토론과 상호작용을 통해 데이터를 도출 | - 집단 역학(Group Dynamics) 활용, 사회적 규범/합의 형성 과정 관찰<br>- 참여자 간 의견 충돌/상호 보완을 통해 심층적 맥락 발견 가능<br>- 진행자는 촉진자(Facilitator) 역할 수행 |
+| **IDI** (Individual Depth Interview) | 연구자와 대상자가 1:1로 대면하여 개인의 경험, 감정, 신념 등을 깊이 있게 탐구하는 방식 | - 타인의 시선 없이 민감한 주제/개인적 경험 청취 적합<br>- 무의식적 반응이나 복잡한 행동 동기 심층 파악 가능<br>- 정보의 밀도와 정확성이 매우 높음 |
+        """)
+        st.markdown("<br>", unsafe_allow_html=True)
+
         if not is_all_valid:
             st.warning("필수 정보를 300자 이상 입력하시면 AI가 최적의 인터뷰 방식을 제안합니다.")
-        else:
-            st.markdown("**인터뷰 방식 선택:**")
-            
-            # 인터뷰 방식 선택
+            interview_options = ["FGI (Focus Group Interview)", "FGD (Focus Group Discussion)", "IDI (Individual Depth Interview)"]
             interview_type = st.radio(
                 "인터뷰 방식",
-                options=["FGI (Focus Group Interview)", "FGD (Focus Group Discussion)", "IDI (Individual Depth Interview)"],
+                options=interview_options,
                 key="interview_type_radio",
                 help="FGI: 모더레이터 1 : 소비자 N | FGD: 소비자 N (비개입) | IDI: 1:1 심층 인터뷰"
             )
             st.session_state.interview_type = interview_type
-            
+        else:
+            # AI 추천: definition, needs 기반으로 Gemini 호출 (입력이 바뀌면 재계산)
+            definition = st.session_state.get("definition", "")
+            needs = st.session_state.get("needs", "")
+            input_hash = hash((definition, needs))
+            if (
+                st.session_state.get("interview_ai_rec_input_hash") != input_hash
+                or "interview_ai_rec_method" not in st.session_state
+            ):
+                try:
+                    client = GeminiClient()
+                    recommended_method, reason = client.recommend_interview_method(definition, needs)
+                    st.session_state.interview_ai_rec_input_hash = input_hash
+                    st.session_state.interview_ai_rec_method = recommended_method
+                    st.session_state.interview_ai_rec_reason = reason
+                except Exception as e:
+                    st.session_state.interview_ai_rec_input_hash = input_hash
+                    st.session_state.interview_ai_rec_method = "FGI (Focus Group Interview)"
+                    st.session_state.interview_ai_rec_reason = f"추천 생성 중 오류: {e}"
+            recommended_method = st.session_state.interview_ai_rec_method
+            reason = st.session_state.interview_ai_rec_reason
+            st.success(f"**AI 추천: {recommended_method}** — {reason}")
             st.markdown("<br>", unsafe_allow_html=True)
-            
-            # AI 추천 메시지
-            if interview_type == "FGI (Focus Group Interview)":
-                st.info("**AI 추천:** 입력하신 니즈에는 FGI 방식이 적합합니다. 그룹 토론을 통해 다양한 관점을 수집할 수 있습니다.")
-            elif interview_type == "FGD (Focus Group Discussion)":
-                st.info("**AI 추천:** 입력하신 니즈에는 FGD 방식이 적합합니다. 자연스러운 소비자 간 대화에서 인사이트를 도출할 수 있습니다.")
+
+            interview_options = ["FGI (Focus Group Interview)", "FGD (Focus Group Discussion)", "IDI (Individual Depth Interview)"]
+            default_idx = interview_options.index(recommended_method) if recommended_method in interview_options else 0
+            interview_type = st.radio(
+                "인터뷰 방식 선택",
+                options=interview_options,
+                index=default_idx,
+                key="interview_type_radio",
+                help="FGI: 모더레이터 1 : 소비자 N | FGD: 소비자 N (비개입) | IDI: 1:1 심층 인터뷰"
+            )
+            st.session_state.interview_type = interview_type
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 모더레이터 질문 가이드 생성 버튼 (Gemini 호출)
+        if st.button("모더레이터 질문 가이드 생성", type="primary", use_container_width=True, key="interview_guide_btn"):
+            definition = st.session_state.get("definition", "")
+            needs = st.session_state.get("needs", "")
+            itype = st.session_state.get("interview_type", "FGI (Focus Group Interview)")
+            with st.spinner("AI가 질문 가이드를 생성하는 중입니다..."):
+                try:
+                    client = GeminiClient()
+                    guide_markdown = client.generate_interview_questions(itype, definition, needs)
+                    st.session_state.interview_guide_markdown = guide_markdown
+                    st.session_state.interview_guide_generated = True
+                except Exception as e:
+                    st.error(f"질문 가이드 생성 중 오류가 발생했습니다: {e}")
+                    st.session_state.interview_guide_markdown = ""
+                    st.session_state.interview_guide_generated = False
+
+        if st.session_state.get("interview_guide_generated", False):
+            st.markdown("---")
+            st.markdown("**생성된 모더레이터 질문 가이드:**")
+            guide_markdown = st.session_state.get("interview_guide_markdown", "")
+            if guide_markdown:
+                st.markdown(guide_markdown)
             else:
-                st.info("**AI 추천:** 입력하신 니즈에는 IDI 방식이 적합합니다. 개인별 심층적인 의견을 수집할 수 있습니다.")
-            
-            st.markdown("<br>", unsafe_allow_html=True)
-            
-            # 모더레이터 질문 가이드 생성 버튼
-            if st.button("모더레이터 질문 가이드 생성", type="primary", use_container_width=True, key="interview_guide_btn"):
-                st.session_state.interview_guide_generated = True
-            
-            if st.session_state.get("interview_guide_generated", False):
-                st.markdown("---")
-                st.markdown("**생성된 모더레이터 질문 가이드:**")
-                
-                guide_sections = [
-                    {
-                        "section": "오프닝 (5분)",
-                        "questions": [
-                            "오늘 참석해주셔서 감사합니다. 먼저 간단히 자기소개 부탁드립니다.",
-                            "이 제품에 대해 들어보신 적이 있으신가요?"
-                        ]
-                    },
-                    {
-                        "section": "본론 - 제품 인식 (15분)",
-                        "questions": [
-                            "이 제품을 처음 접했을 때 어떤 생각이 들었나요?",
-                            "경쟁 제품과 비교했을 때 어떤 차이점이 느껴지시나요?",
-                            "가장 매력적인 점과 아쉬운 점은 무엇인가요?"
-                        ]
-                    },
-                    {
-                        "section": "본론 - 구매 의도 (15분)",
-                        "questions": [
-                            "실제로 구매를 고려해보신 적이 있으신가요?",
-                            "구매 결정에 가장 큰 영향을 미치는 요소는 무엇인가요?",
-                            "가격이 구매 결정에 어떤 영향을 미치나요?"
-                        ]
-                    },
-                    {
-                        "section": "마무리 (5분)",
-                        "questions": [
-                            "이 제품을 주변 사람들에게 추천하시겠나요?",
-                            "개선되었으면 하는 점이 있다면 무엇인가요?"
-                        ]
-                    }
-                ]
-                
-                for section in guide_sections:
-                    st.markdown(f"**{section['section']}**")
-                    for q in section['questions']:
-                        st.markdown(f"- {q}")
-                    st.markdown("<br>", unsafe_allow_html=True)
+                st.caption("(내용 없음)")
         
         st.markdown('</div>', unsafe_allow_html=True)
         

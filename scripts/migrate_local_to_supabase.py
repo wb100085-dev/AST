@@ -129,6 +129,7 @@ def migrate_from_sqlite(sb, sqlite_path: str) -> dict:
                     "sido_name": row["sido_name"],
                     "record_timestamp": row["record_timestamp"] or "",
                     "record_excel_path": row["record_excel_path"] or "",
+                    "chunk_index": 0,
                     "data_json": row["data_json"] if row["data_json"] else "[]",
                 }).execute()
                 counts["virtual_population_db"] += 1
@@ -177,6 +178,7 @@ def migrate_from_step2_records(sb, step2_dir: str) -> int:
             "sido_name": sido_name,
             "record_timestamp": timestamp,
             "record_excel_path": excel_path,
+            "chunk_index": 0,
             "data_json": data_json,
         }).execute()
         count += 1

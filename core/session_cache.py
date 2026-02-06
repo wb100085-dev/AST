@@ -46,6 +46,18 @@ def get_cached_db_axis_margin_stats(sido_code: str, axis_key: str) -> Optional[D
     return result
 
 
+def get_cached_db_all_axis_margin_stats(sido_code: str) -> Dict[str, Dict[str, Any]]:
+    """해당 시도 6축 마진 설정을 한 번의 쿼리로 조회 후 세션에 캐시(ttl 개념은 세션 유지 동안). 저장 직후 무효화로 최신값 반영."""
+    key = f"_cache_db_all_axis_margin_{sido_code}"
+    cached = _get_cached(key)
+    if cached is not None:
+        return cached
+    from core.db import db_get_all_axis_margin_stats
+    result = db_get_all_axis_margin_stats(sido_code)
+    st.session_state[key] = result
+    return result
+
+
 def get_cached_db_six_axis_stat_ids(sido_code: str) -> Set[int]:
     """db_get_six_axis_stat_ids 결과를 세션에 캐시."""
     key = f"_cache_db_six_axis_stat_ids_{sido_code}"
@@ -79,8 +91,8 @@ def invalidate_db_stats_cache(sido_code: Optional[str] = None):
 
 
 def invalidate_db_axis_margin_cache(sido_code: Optional[str] = None):
-    """axis_margin / six_axis 세션 캐시 무효화 (다른 페이지에서 get_cached_db_axis_margin_stats 사용 시 최신 조회)."""
-    for prefix in ("_cache_db_axis_margin_", "_cache_db_six_axis_stat_ids_"):
+    """axis_margin / six_axis / all_axis_margin 세션 캐시 무효화 (6축 저장 직후 최신값 반영)."""
+    for prefix in ("_cache_db_axis_margin_", "_cache_db_all_axis_margin_", "_cache_db_six_axis_stat_ids_"):
         to_del = [k for k in list(st.session_state.keys()) if k.startswith(prefix)]
         if sido_code is not None:
             to_del = [k for k in to_del if k.startswith(f"{prefix}{sido_code}_") or k == f"{prefix}{sido_code}"]

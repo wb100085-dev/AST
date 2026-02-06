@@ -10,6 +10,7 @@ import pandas as pd
 from pages.common import apply_common_styles, render_definition_block, render_needs_block
 from core.constants import SIDO_LABEL_TO_CODE, SIDO_CODE_TO_NAME, SIDO_MASTER, SIDO_TOTAL_POP
 from core.session_cache import get_sido_master
+from utils.gemini_client import GeminiClient
 
 
 def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
@@ -1305,12 +1306,45 @@ def _render_survey_subpage():
             st.markdown("**지역·패널**")
             sido_master = get_sido_master()
             sido_options = [f"{s['sido_name']} ({s['sido_code']})" for s in sido_master]
-            default_label = st.session_state.get("survey_ai_sido_label", "경상북도 (37)")
-            default_idx = sido_options.index(default_label) if default_label in sido_options else 0
+            # 세션 초기화: 지역 선택 키 없으면 기본값 (지도·셀렉트박스 양방향 연동용)
+            if "survey_ai_sido_select" not in st.session_state:
+                st.session_state["survey_ai_sido_select"] = st.session_state.get("survey_ai_sido_label", "경상북도 (37)")
+            if st.session_state["survey_ai_sido_select"] not in sido_options:
+                st.session_state["survey_ai_sido_select"] = sido_options[0] if sido_options else "경상북도 (37)"
+            # 지도 클릭 선택 처리 → 지역 선택 셀렉트박스와 연동
+            _map_state = st.session_state.get("survey_ai_sido_map")
+            _sel = None
+            if _map_state is not None:
+                _sel = _map_state.get("selection") if isinstance(_map_state, dict) else getattr(_map_state, "selection", None)
+            _pts = []
+            if _sel is not None:
+                _pts = _sel.get("points", []) if isinstance(_sel, dict) else (getattr(_sel, "points", None) or [])
+            if not _pts and isinstance(_sel, dict) and _sel.get("locations"):
+                _pts = [{"location": loc} if isinstance(loc, (str, int, float)) else loc for loc in (_sel.get("locations") or [])]
+            if _pts:
+                _p0 = _pts[0] if isinstance(_pts[0], dict) else (getattr(_pts[0], "__dict__", None) or {})
+                _cd = _p0.get("customdata") or _p0.get("customData")
+                _loc_id = _p0.get("location")
+                _code = None
+                if _cd and (isinstance(_cd, (list, tuple)) and len(_cd) > 0):
+                    _code = str(_cd[0])
+                elif isinstance(_cd, (str, int, float)):
+                    _code = str(_cd)
+                if not _code and _loc_id is not None:
+                    _code = str(_loc_id)
+                if not _code:
+                    _pi = _p0.get("point_index") or _p0.get("pointIndex")
+                    if _pi is not None:
+                        _sidos_ordered = [s["sido_code"] for s in SIDO_MASTER if s.get("sido_code") != "00"]
+                        if 0 <= _pi < len(_sidos_ordered):
+                            _code = str(_sidos_ordered[_pi])
+                if _code and _code in SIDO_CODE_TO_NAME:
+                    _label = f"{SIDO_CODE_TO_NAME[_code]} ({_code})"
+                    if _label in sido_options:
+                        st.session_state["survey_ai_sido_select"] = _label
             selected_sido_label = st.selectbox(
                 "지역 선택",
                 options=sido_options,
-                index=default_idx,
                 key="survey_ai_sido_select",
             )
             st.session_state.survey_ai_sido_label = selected_sido_label
@@ -1358,7 +1392,7 @@ def _render_survey_subpage():
                         "total_pop": SIDO_TOTAL_POP.get(code),
                     }
                 fig = _build_korea_choropleth_figure(selected_sido_code, region_stats)
-                st.plotly_chart(fig, key="survey_ai_sido_map", use_container_width=True)
+                st.plotly_chart(fig, key="survey_ai_sido_map", use_container_width=True, on_select="rerun", selection_mode="points")
             except Exception:
                 st.caption("지도를 불러올 수 없습니다.")
 
@@ -1556,46 +1590,390 @@ def _render_interview_subpage():
         </div>
         """, unsafe_allow_html=True)
     with col_btn:
-        if st.button("← 설계 선택으로", key="interview_back_to_design", type="secondary"):
-            st.session_state.survey_design_subpage = ""
+        _interview_flow = st.session_state.get("survey_interview_flow_page", "")
+        if st.button("이전페이지", key="interview_back_to_design", type="secondary"):
+            if _interview_flow == "ai_interview_conduct":
+                st.session_state.survey_interview_flow_page = "ai_interview_options"
+            elif _interview_flow == "ai_interview_options":
+                st.session_state.survey_interview_flow_page = ""
+            else:
+                st.session_state.survey_design_subpage = ""
             st.rerun()
 
-    st.markdown("**인터뷰 방식 선택:**")
-    interview_type = st.radio(
-        "인터뷰 방식",
-        options=["FGI (Focus Group Interview)", "FGD (Focus Group Discussion)", "IDI (Individual Depth Interview)"],
-        key="interview_type_radio",
-        help="FGI: 모더레이터 1 : 소비자 N | FGD: 소비자 N (비개입) | IDI: 1:1 심층 인터뷰"
-    )
-    st.session_state.interview_type = interview_type
-    st.markdown("<br>", unsafe_allow_html=True)
+    # AI 심층면접 진행 실행 화면 (추후 구현)
+    if st.session_state.get("survey_interview_flow_page") == "ai_interview_conduct":
+        st.info("AI 심층면접 진행 화면은 추후 구현 예정입니다. 상단 **이전페이지**로 돌아가 옵션을 다시 선택할 수 있습니다.")
+        return
 
-    if interview_type == "FGI (Focus Group Interview)":
-        st.info("**AI 추천:** 입력하신 니즈에는 FGI 방식이 적합합니다. 그룹 토론을 통해 다양한 관점을 수집할 수 있습니다.")
-    elif interview_type == "FGD (Focus Group Discussion)":
-        st.info("**AI 추천:** 입력하신 니즈에는 FGD 방식이 적합합니다. 자연스러운 소비자 간 대화에서 인사이트를 도출할 수 있습니다.")
+    # AI 심층면접 진행 옵션 선택 페이지 (가상인구 선택 + 선택 요약 및 진행만 표시)
+    if st.session_state.get("survey_interview_flow_page") == "ai_interview_options":
+        st.markdown("### AI 심층면접 진행 옵션 선택")
+        st.caption("**지역**과 **패널 수**를 선택한 뒤 **가상인구 불러오기**를 누르고, 인터뷰 방식에 맞게 가상인구를 선택한 뒤 **AI 심층면접 진행**을 누르세요.")
+
+        col_dialog, col_conduct = st.columns(2)
+        with col_dialog:
+            st.subheader("가상인구 선택 (인터뷰 방식에 맞게)")
+            # 지역·패널 수·불러오기 (지도/불러온 가상인구 정보 제거 후 최소 로딩용)
+            sido_master = get_sido_master()
+            sido_options = [f"{s['sido_name']} ({s['sido_code']})" for s in sido_master]
+            if "survey_interview_sido_select" not in st.session_state:
+                st.session_state["survey_interview_sido_select"] = st.session_state.get("survey_interview_sido_label", "경상북도 (37)")
+            if st.session_state["survey_interview_sido_select"] not in sido_options:
+                st.session_state["survey_interview_sido_select"] = sido_options[0] if sido_options else "경상북도 (37)"
+            c_region, c_panel, c_btn = st.columns([1, 1, 1])
+            with c_region:
+                selected_sido_label = st.selectbox("지역 선택", options=sido_options, key="survey_interview_sido_select")
+                st.session_state.survey_interview_sido_label = selected_sido_label
+            with c_panel:
+                panel_count = st.number_input(
+                    "패널 수",
+                    min_value=1,
+                    max_value=1000,
+                    value=st.session_state.get("survey_interview_panel_count", 10),
+                    key="survey_interview_panel_count_input",
+                )
+                st.session_state.survey_interview_panel_count = panel_count
+            with c_btn:
+                load_clicked = st.button("가상인구 불러오기", type="primary", use_container_width=True, key="survey_interview_load_btn")
+            if load_clicked:
+                selected_sido_code = SIDO_LABEL_TO_CODE.get(selected_sido_label, "37")
+                try:
+                    from core.db import get_virtual_population_db_combined_df
+                    combined_df = get_virtual_population_db_combined_df(selected_sido_code)
+                    if combined_df is not None and len(combined_df) > 0:
+                        n = min(int(panel_count), len(combined_df))
+                        panel_df = combined_df.sample(n=n, random_state=42) if len(combined_df) >= n else combined_df.head(n)
+                        st.session_state.survey_interview_panel_df = panel_df
+                        st.success(f"**{n}명** 불러옴 (페르소나·현시대 반영)")
+                    else:
+                        st.session_state.pop("survey_interview_panel_df", None)
+                        st.warning("해당 지역에 가상인구가 없습니다. 가상인구 DB에서 2차 대입 후 전체 학습을 실행하세요.")
+                except Exception as e:
+                    st.session_state.pop("survey_interview_panel_df", None)
+                    st.warning(f"가상인구 DB 조회 오류: {e}")
+                st.rerun()
+            st.markdown("---")
+            interview_type = st.session_state.get("interview_type", "FGI (Focus Group Interview)")
+            is_idi = "IDI" in interview_type
+            is_fgi = "FGI" in interview_type
+            is_fgd = "FGD" in interview_type
+            if is_idi:
+                st.caption("1:1 개인 심층면접용으로 **1명**을 선택하세요.")
+            elif is_fgi:
+                st.caption("포커스 그룹 인터뷰용으로 **6~12명**을 선택하세요.")
+            else:
+                st.caption("포커스 그룹 토론용으로 **6~12명**을 선택하세요.")
+
+            panel_df = st.session_state.get("survey_interview_panel_df")
+            if panel_df is None or len(panel_df) == 0:
+                st.info("위에서 지역과 패널 수를 선택한 뒤 **가상인구 불러오기**를 눌러주세요.")
+                st.session_state.pop("survey_interview_selected_persons", None)
+            else:
+                combined_df = panel_df
+                OPT = "선택하세요"
+                age_set = set()
+                gender_set = set()
+                region_set = set()
+                person_meta = []
+                for idx, row in combined_df.iterrows():
+                    age = row.get("연령", 0)
+                    try:
+                        age_num = int(float(str(age)))
+                        if age_num < 20:
+                            ag = "10대"
+                        elif age_num < 30:
+                            ag = "20대"
+                        elif age_num < 40:
+                            ag = "30대"
+                        elif age_num < 50:
+                            ag = "40대"
+                        elif age_num < 60:
+                            ag = "50대"
+                        elif age_num < 70:
+                            ag = "60대"
+                        elif age_num < 80:
+                            ag = "70대"
+                        else:
+                            ag = "80대 이상"
+                    except Exception:
+                        ag = "미상"
+                    g = str(row.get("성별", "N/A")).strip()
+                    reg = str(row.get("거주지역", "N/A")).strip()
+                    age_set.add(ag)
+                    gender_set.add(g)
+                    region_set.add(reg)
+                    person_meta.append((idx, row, ag, g, reg))
+                age_opts = [OPT] + sorted(age_set)
+                gender_opts = [OPT] + sorted(gender_set)
+                region_opts = [OPT] + sorted(region_set)
+                sa = st.session_state.get("survey_interview_filter_age", OPT)
+                sg = st.session_state.get("survey_interview_filter_gender", OPT)
+                sr = st.session_state.get("survey_interview_filter_region", OPT)
+                idx_a = age_opts.index(sa) if sa in age_opts else 0
+                idx_g = gender_opts.index(sg) if sg in gender_opts else 0
+                idx_r = region_opts.index(sr) if sr in region_opts else 0
+                with st.form("survey_interview_filter_form"):
+                    r1, r2, r3 = st.columns(3)
+                    with r1:
+                        sel_age = st.selectbox("연령대", options=age_opts, index=idx_a)
+                    with r2:
+                        sel_gender = st.selectbox("성별", options=gender_opts, index=idx_g)
+                    with r3:
+                        sel_region = st.selectbox("지역", options=region_opts, index=idx_r)
+                    submitted = st.form_submit_button("조회")
+                if submitted:
+                    st.session_state["survey_interview_filter_age"] = sel_age
+                    st.session_state["survey_interview_filter_gender"] = sel_gender
+                    st.session_state["survey_interview_filter_region"] = sel_region
+                use_age = st.session_state.get("survey_interview_filter_age", OPT)
+                use_gender = st.session_state.get("survey_interview_filter_gender", OPT)
+                use_region = st.session_state.get("survey_interview_filter_region", OPT)
+                if use_age != OPT and use_gender != OPT and use_region != OPT:
+                    filtered = [(idx, row) for idx, row, ag, g, reg in person_meta if ag == use_age and g == use_gender and reg == use_region]
+                    if filtered:
+                        person_options = []
+                        for idx, row in filtered:
+                            name = row.get("가상이름", f"인물 {idx+1}")
+                            age = row.get("연령", "N/A")
+                            gender = row.get("성별", "N/A")
+                            region = row.get("거주지역", "N/A")
+                            person_options.append((idx, f"{name} ({age}세, {gender}, {region})", row))
+                        if is_idi:
+                            sel_idx = st.selectbox(
+                                "가상인구 1명 선택",
+                                options=[p[0] for p in person_options],
+                                format_func=lambda x, opts=person_options: next(lbl for i, lbl, _ in opts if i == x),
+                                key="survey_interview_select_idi",
+                            )
+                            selected_persons = [next(r for i, _, r in person_options if i == sel_idx)]
+                        else:
+                            min_n, max_n = (6, 12) if (is_fgi or is_fgd) else (1, 12)
+                            sel_indices = st.multiselect(
+                                f"가상인구 선택 ({min_n}~{max_n}명)",
+                                options=[p[0] for p in person_options],
+                                format_func=lambda x, opts=person_options: next(lbl for i, lbl, _ in opts if i == x),
+                                key="survey_interview_select_group",
+                                max_selections=max_n,
+                            )
+                            selected_persons = [next(r for i, _, r in person_options if i == idx) for idx in sel_indices] if sel_indices else []
+                            if selected_persons and (len(selected_persons) < min_n or len(selected_persons) > max_n):
+                                st.caption(f"**{min_n}~{max_n}명**을 선택해주세요. (현재 {len(selected_persons)}명)")
+                                st.session_state.pop("survey_interview_selected_persons", None)
+                        if selected_persons and (is_idi or (len(selected_persons) >= 6 and len(selected_persons) <= 12)):
+                            st.session_state.survey_interview_selected_persons = selected_persons
+                            with st.expander("선택한 가상인구 정보", expanded=False):
+                                for i, row in enumerate(selected_persons):
+                                    st.write(f"- **{row.get('가상이름', 'N/A')}** ({row.get('연령', 'N/A')}세, {row.get('성별', 'N/A')}, {row.get('거주지역', 'N/A')})")
+                        else:
+                            if not is_idi and selected_persons:
+                                st.session_state.pop("survey_interview_selected_persons", None)
+                            elif is_idi and not selected_persons:
+                                st.session_state.pop("survey_interview_selected_persons", None)
+                    else:
+                        st.warning("선택한 조건에 해당하는 가상인구가 없습니다.")
+                        st.session_state.pop("survey_interview_selected_persons", None)
+                else:
+                    st.caption("연령대, 성별, 지역을 선택한 뒤 **조회** 버튼을 눌러주세요.")
+                    st.session_state.pop("survey_interview_selected_persons", None)
+
+        with col_conduct:
+            st.subheader("선택 요약 및 진행")
+            selected_persons = st.session_state.get("survey_interview_selected_persons") or []
+            interview_type = st.session_state.get("interview_type", "FGI (Focus Group Interview)")
+            is_idi = "IDI" in interview_type
+            valid_count = len(selected_persons) == 1 if is_idi else (6 <= len(selected_persons) <= 12)
+            if selected_persons and valid_count:
+                st.caption(f"선택된 가상인구 **{len(selected_persons)}명**")
+                for i, row in enumerate(selected_persons[:5]):
+                    st.caption(f"{i+1}. {row.get('가상이름', 'N/A')} ({row.get('연령', 'N/A')}세, {row.get('성별', 'N/A')})")
+                if len(selected_persons) > 5:
+                    st.caption(f"… 외 {len(selected_persons) - 5}명")
+                if st.button("AI 심층면접 진행", type="primary", use_container_width=True, key="survey_interview_conduct_btn"):
+                    st.session_state.survey_interview_flow_page = "ai_interview_conduct"
+                    st.rerun()
+            else:
+                st.caption("왼쪽에서 인터뷰 방식에 맞게 가상인구를 선택한 뒤 진행할 수 있습니다.")
+                st.button("AI 심층면접 진행", type="primary", use_container_width=True, key="survey_interview_conduct_btn", disabled=True)
+        return
+
+    # AI 추천: 정의·니즈 기반 (캐시 후 표시)
+    definition = st.session_state.get("definition", "") or ""
+    needs = st.session_state.get("needs", "") or ""
+    if definition.strip() and needs.strip():
+        input_hash = hash((definition, needs))
+        if (
+            st.session_state.get("interview_ai_rec_input_hash") != input_hash
+            or "interview_ai_rec_method" not in st.session_state
+        ):
+            try:
+                client = GeminiClient()
+                recommended_method, reason = client.recommend_interview_method(definition, needs)
+                st.session_state.interview_ai_rec_input_hash = input_hash
+                st.session_state.interview_ai_rec_method = recommended_method
+                st.session_state.interview_ai_rec_reason = reason
+            except Exception as e:
+                st.session_state.interview_ai_rec_input_hash = input_hash
+                st.session_state.interview_ai_rec_method = "FGI (Focus Group Interview)"
+                st.session_state.interview_ai_rec_reason = f"추천 생성 중 오류: {e}"
+        recommended_method = st.session_state.interview_ai_rec_method
+        reason = st.session_state.interview_ai_rec_reason
+        st.success(f"**AI 추천: {recommended_method}** — {reason}")
+        # 처음 선택이 없으면 AI 추천값으로 초기화
+        if "interview_type" not in st.session_state or st.session_state.interview_type not in (
+            "FGI (Focus Group Interview)", "FGD (Focus Group Discussion)", "IDI (Individual Depth Interview)"
+        ):
+            st.session_state.interview_type = recommended_method
     else:
-        st.info("**AI 추천:** 입력하신 니즈에는 IDI 방식이 적합합니다. 개인별 심층적인 의견을 수집할 수 있습니다.")
+        if "interview_type" not in st.session_state or st.session_state.interview_type not in (
+            "FGI (Focus Group Interview)", "FGD (Focus Group Discussion)", "IDI (Individual Depth Interview)"
+        ):
+            st.session_state.interview_type = "FGI (Focus Group Interview)"
+        st.caption("제품 정의와 조사 목적·니즈를 입력하면 AI가 적합한 방식을 추천합니다.")
 
+    st.markdown("**인터뷰 방식 선택** (설명을 읽고 하나를 선택하세요)")
+
+    FGI = "FGI (Focus Group Interview)"
+    FGD = "FGD (Focus Group Discussion)"
+    IDI = "IDI (Individual Depth Interview)"
+    current = st.session_state.get("interview_type", FGI)
+
+    # 이미지 경로 (프로젝트 루트 기준, 실행 경로에 따라 후보 추가)
+    import os
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _img_dir = os.path.join(_root, "assets", "interview_methods")
+    def _img_path(name):
+        p = os.path.join(_img_dir, name)
+        if os.path.isfile(p):
+            return p
+        # 실행 디렉터리가 프로젝트 루트인 경우
+        alt = os.path.join(os.getcwd(), "assets", "interview_methods", name)
+        return alt if os.path.isfile(alt) else p
+    _fgi_img = _img_path("fgi.png")
+    _fgd_img = _img_path("fgd.png")
+    _idi_img = _img_path("idi.png")
+    _has_all = os.path.isfile(_fgi_img) and os.path.isfile(_fgd_img) and os.path.isfile(_idi_img)
+    if not _has_all:
+        st.info(
+            "각 인터뷰 방식에 그림을 넣으려면 프로젝트 폴더 **assets/interview_methods/** 에 "
+            "다음 파일을 넣어주세요: **fgi.png**(FGI), **fgd.png**(FGD), **idi.png**(IDI). "
+            "첨부하신 사진 순서대로 1번→fgi.png, 2번→fgd.png, 3번→idi.png 로 저장하면 됩니다."
+        )
+
+    # 설명 영역 (3열): 각 방식 설명 보기 위에 이미지 배치 (비율 유지, 가로는 열 너비에 맞춤)
+    col_fgi, col_fgd, col_idi = st.columns(3)
+    with col_fgi:
+        st.markdown("**1. FGI** (Focus Group Interview)")
+        if os.path.isfile(_fgi_img):
+            st.image(_fgi_img, use_container_width=True)
+        with st.expander("방식 설명 보기", expanded=True):
+            st.caption(
+                "진행자(Moderator) 주도로 소수의 참여자(6~12인)를 대상으로 특정 주제에 대해 인터뷰를 진행하여 정보를 수집하는 방식입니다. "
+                "진행자가 사전에 준비된 가이드라인에 따라 질문을 던지고 답변을 청취하는 구조이며, "
+                "다수의 의견을 효율적으로 수집 가능하고 공통된 인식·패턴 파악에 유리합니다. "
+                "참여자 간 상호작용보다 진행자와 참여자 간 문답이 주를 이룹니다."
+            )
+    with col_fgd:
+        st.markdown("**2. FGD** (Focus Group Discussion)")
+        if os.path.isfile(_fgd_img):
+            st.image(_fgd_img, use_container_width=True)
+        with st.expander("방식 설명 보기", expanded=True):
+            st.caption(
+                "FGI와 유사한 환경이나, 진행자의 개입을 최소화하고 참여자 간 자유로운 토론과 상호작용을 통해 데이터를 도출합니다. "
+                "집단 역학(Group Dynamics)을 활용해 사회적 규범·합의 형성 과정을 관찰하며, "
+                "참여자 간 의견 충돌·상호 보완 과정을 통해 심층적 맥락 발견이 가능합니다. "
+                "진행자는 토론의 촉진자(Facilitator) 역할을 수행하며 흐름 관리에 집중합니다."
+            )
+    with col_idi:
+        st.markdown("**3. IDI** (Individual Depth Interview)")
+        if os.path.isfile(_idi_img):
+            st.image(_idi_img, use_container_width=True)
+        with st.expander("방식 설명 보기", expanded=True):
+            st.caption(
+                "연구자와 대상자가 1:1로 대면하여 개인의 경험, 감정, 신념 등을 깊이 있게 탐구하는 방식입니다. "
+                "타인의 시선을 의식하지 않아도 되어 민감한 주제·개인적 경험 청취에 적합하며, "
+                "대상자의 무의식적 반응이나 복잡한 행동 동기를 심층적으로 파악할 수 있습니다. "
+                "시간·비용 소요가 크지만 정보의 밀도와 정확성이 매우 높습니다."
+            )
+
+    # 버튼 한 줄 (이전페이지 버튼과 동일한 높이로 정렬) — 3열 모두에 버튼이 있는 행만 선택
+    st.markdown("""
+    <style>
+    div[data-testid="stHorizontalBlock"]:has(> div:nth-child(1) .stButton):has(> div:nth-child(2) .stButton):has(> div:nth-child(3) .stButton) .stButton > button {
+        min-height: 1.75rem !important; height: 1.75rem !important;
+        padding: 0.2rem 0.6rem !important; font-size: 0.8rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
+    with btn_col1:
+        if st.button("이 방식 선택", key="interview_sel_fgi", type="primary" if current == FGI else "secondary", use_container_width=True):
+            st.session_state.interview_type = FGI
+            st.rerun()
+        if current == FGI:
+            st.caption("✓ 선택됨")
+    with btn_col2:
+        if st.button("이 방식 선택", key="interview_sel_fgd", type="primary" if current == FGD else "secondary", use_container_width=True):
+            st.session_state.interview_type = FGD
+            st.rerun()
+        if current == FGD:
+            st.caption("✓ 선택됨")
+    with btn_col3:
+        if st.button("이 방식 선택", key="interview_sel_idi", type="primary" if current == IDI else "secondary", use_container_width=True):
+            st.session_state.interview_type = IDI
+            st.rerun()
+        if current == IDI:
+            st.caption("✓ 선택됨")
+
+    interview_type = st.session_state.get("interview_type", FGI)
     st.markdown("<br>", unsafe_allow_html=True)
+
     if st.button("모더레이터 질문 가이드 생성", type="primary", use_container_width=True, key="interview_guide_btn"):
-        st.session_state.interview_guide_generated = True
+        definition = st.session_state.get("definition", "") or ""
+        needs = st.session_state.get("needs", "") or ""
+        with st.spinner("선택한 방식에 맞는 질문 가이드를 생성하는 중입니다..."):
+            try:
+                client = GeminiClient()
+                guide_markdown = client.generate_interview_questions(interview_type, definition, needs)
+                st.session_state.interview_guide_markdown = guide_markdown
+                st.session_state.interview_guide_generated = True
+            except Exception as e:
+                st.error(f"질문 가이드 생성 중 오류가 발생했습니다: {e}")
+                st.session_state.interview_guide_markdown = ""
         st.rerun()
 
     if st.session_state.get("interview_guide_generated", False):
         st.markdown("---")
         st.markdown("**생성된 모더레이터 질문 가이드:**")
-        guide_sections = [
-            {"section": "오프닝 (5분)", "questions": ["오늘 참석해주셔서 감사합니다. 먼저 간단히 자기소개 부탁드립니다.", "이 제품에 대해 들어보신 적이 있으신가요?"]},
-            {"section": "본론 - 제품 인식 (15분)", "questions": ["이 제품을 처음 접했을 때 어떤 생각이 들었나요?", "경쟁 제품과 비교했을 때 어떤 차이점이 느껴지시나요?", "가장 매력적인 점과 아쉬운 점은 무엇인가요?"]},
-            {"section": "본론 - 구매 의도 (15분)", "questions": ["실제로 구매를 고려해보신 적이 있으신가요?", "구매 결정에 가장 큰 영향을 미치는 요소는 무엇인가요?", "가격이 구매 결정에 어떤 영향을 미치나요?"]},
-            {"section": "마무리 (5분)", "questions": ["이 제품을 주변 사람들에게 추천하시겠나요?", "개선되었으면 하는 점이 있다면 무엇인가요?"]},
-        ]
-        for section in guide_sections:
-            st.markdown(f"**{section['section']}**")
-            for q in section["questions"]:
-                st.markdown(f"- {q}")
-            st.markdown("<br>", unsafe_allow_html=True)
+        guide_markdown = st.session_state.get("interview_guide_markdown", "")
+        is_editing = st.session_state.get("interview_guide_editing", False)
+
+        if is_editing:
+            st.text_area(
+                "질문 가이드 수정",
+                height=400,
+                key="interview_guide_edit_area",
+                label_visibility="collapsed",
+            )
+            if st.button("저장", type="primary", key="interview_guide_save_btn"):
+                st.session_state.interview_guide_markdown = st.session_state.get("interview_guide_edit_area", guide_markdown)
+                st.session_state.interview_guide_editing = False
+                st.session_state.pop("interview_guide_edit_area", None)
+                st.rerun()
+        else:
+            if guide_markdown:
+                st.markdown(guide_markdown)
+            else:
+                st.caption("(내용 없음)")
+            col_edit, col_conduct = st.columns(2)
+            with col_edit:
+                if st.button("수정", key="interview_guide_edit_btn", use_container_width=True):
+                    st.session_state.interview_guide_editing = True
+                    st.session_state.interview_guide_edit_area = st.session_state.get("interview_guide_markdown", "")
+                    st.rerun()
+            with col_conduct:
+                if st.button("심층면접 진행", type="primary", key="interview_conduct_btn", use_container_width=True):
+                    st.session_state.survey_interview_flow_page = "ai_interview_options"
+                    st.rerun()
     st.caption("데이터는 암호화되어 보호되며, 분석 완료 후 즉시 파기됩니다.")
 
 
@@ -1706,13 +2084,28 @@ def page_survey():
         with col_user:
             st.markdown("**사용자 선택**")
             st.caption("설문조사 또는 심층면접 중 진행할 방식을 선택하세요.")
+            import os
+            _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            _choice_img_dir = os.path.join(_root, "assets", "interview_methods")
+            _survey_img = os.path.join(_choice_img_dir, "Survey.png")
+            _interview_img = os.path.join(_choice_img_dir, "In-depth Interview.png")
+            st.markdown(
+                '<div id="survey-user-choice-area"></div><style>'
+                'div:has(#survey-user-choice-area) + div[data-testid="stHorizontalBlock"] .stButton > button { min-height: 250px !important; height: 250px !important; }'
+                '</style>',
+                unsafe_allow_html=True,
+            )
             btn_survey, btn_interview = st.columns(2)
             with btn_survey:
+                if os.path.isfile(_survey_img):
+                    st.image(_survey_img, use_container_width=True)
                 if st.button("설문조사", use_container_width=True, key="survey_btn_user_survey"):
                     st.session_state.survey_design_subpage = "설문조사"
                     st.session_state.survey_method_chosen = "설문조사"
                     st.rerun()
             with btn_interview:
+                if os.path.isfile(_interview_img):
+                    st.image(_interview_img, use_container_width=True)
                 if st.button("심층면접", use_container_width=True, key="survey_btn_user_interview"):
                     st.session_state.survey_design_subpage = "심층면접"
                     st.session_state.survey_method_chosen = "심층면접"

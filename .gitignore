@@ -55,6 +55,7 @@ data/*.xlsx
 data/*.db
 data/step2_records/*.xlsx
 data/step2_records/*.json
+data/survey_latest/
 data/*.pkl
 
 # Temporary files

@@ -80,18 +80,20 @@ CREATE TABLE IF NOT EXISTS sido_templates (
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 7. virtual_population_db (가상인구 DB: 2차 대입결과별 data_json 저장)
+-- 7. virtual_population_db (가상인구 DB: 2차 대입결과별 data_json 저장, 청크 단위로 분할 INSERT)
 CREATE TABLE IF NOT EXISTS virtual_population_db (
     id BIGSERIAL PRIMARY KEY,
     sido_code TEXT NOT NULL,
     sido_name TEXT NOT NULL,
     record_timestamp TEXT NOT NULL,
     record_excel_path TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
     data_json TEXT NOT NULL,
     added_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_vpd_sido_added ON virtual_population_db(sido_code, added_at);
 CREATE INDEX IF NOT EXISTS idx_vpd_sido_ts_path ON virtual_population_db(sido_code, record_timestamp, record_excel_path);
+-- 기존 DB 마이그레이션: docs/SUPABASE_VPD_CHUNK_INDEX_MIGRATION.sql 참고
 
 -- RLS 활성화 후 anon 역할로 읽기/쓰기 허용 (개발·단일 사용자용)
 -- 이미 정책이 있으면 DROP 후 다시 생성 (스크립트 재실행 가능)

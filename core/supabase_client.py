@@ -35,6 +35,7 @@ def _get_supabase_credentials() -> Tuple[Optional[str], Optional[str]]:
 def get_supabase():
     """
     Supabase 클라이언트 반환. 연결 실패 시 RuntimeError 발생.
+    @st.cache_resource로 전역 단일 인스턴스 재사용(연결 풀링 효과).
     """
     url, key = _get_supabase_credentials()
     if not url or not key or "your-" in str(key).lower() or "xxxxx" in str(url).lower():

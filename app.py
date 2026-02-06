@@ -13,6 +13,7 @@ from typing import List, Dict, Any, Optional, Tuple, TYPE_CHECKING
 from io import BytesIO
 from datetime import datetime
 
+import gc
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -72,7 +73,7 @@ from core.session_cache import (
 )
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=2)
 def get_cached_kosis_json(url: str) -> list:
     """KOSIS API JSON 결과를 24시간 캐시. fetch_json 대체용."""
     import requests
@@ -84,7 +85,7 @@ def get_cached_kosis_json(url: str) -> list:
     return data
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=2)
 def cached_generate_base_population(
     n: int,
     selected_sigungu_json: str,
@@ -117,7 +118,7 @@ def _apply_step2_column_rename(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=rename) if rename else df
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, hash_funcs={pd.DataFrame: _hash_dataframe})
+@st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=2, hash_funcs={pd.DataFrame: _hash_dataframe})
 def _build_excel_bytes_for_download(df: pd.DataFrame, _is_step2: bool) -> bytes:
     """다운로드 탭에서 요청 시에만 Excel 바이트 생성 (캐시됨)."""
     buf = BytesIO()
@@ -372,7 +373,7 @@ def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
             pass
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, hash_funcs={pd.DataFrame: _hash_dataframe})
+@st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=2, hash_funcs={pd.DataFrame: _hash_dataframe})
 def _apply_step2_logical_consistency_cached(df: pd.DataFrame) -> pd.DataFrame:
     """2단계 논리 일관성 적용 결과 반환 (캐시됨). 동일 df 입력 시 재계산 생략."""
     out = df.copy()
@@ -579,7 +580,7 @@ def page_data_management():
                 st.success(f"6축 설정 {updated}건 저장되었습니다. 새로고침 시 유지됩니다.")
                 st.rerun()
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS)
+@st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=3)
 def convert_kosis_to_distribution_cached(kosis_data_json: str, axis_key: str) -> Tuple[list, list]:
     """KOSIS 데이터 변환 결과를 캐시. 동일 (데이터, 축)이면 재계산 생략."""
     kosis_data = json.loads(kosis_data_json) if kosis_data_json else []
@@ -799,7 +800,7 @@ def convert_kosis_to_distribution(kosis_data, axis_key: str):
 # -----------------------------
 # 6. Chart Helper Functions (캐싱으로 탭 전환 시 재계산 방지)
 # -----------------------------
-@st.cache_data(ttl=CACHE_TTL_SECONDS, hash_funcs={pd.DataFrame: _hash_dataframe})
+@st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=3, hash_funcs={pd.DataFrame: _hash_dataframe})
 def _build_population_pyramid_figure(df: pd.DataFrame):
     """인구 피라미드용 Plotly Figure 생성 (캐시됨). 데이터 없으면 None."""
     import plotly.graph_objects as go
@@ -845,7 +846,7 @@ def _build_population_pyramid_figure(df: pd.DataFrame):
     return fig
 
 
-@st.cache_data(ttl=CACHE_TTL_SECONDS, hash_funcs={pd.DataFrame: _hash_dataframe})
+@st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=3, hash_funcs={pd.DataFrame: _hash_dataframe})
 def _build_chart_figures(df: pd.DataFrame, step2_columns_tuple: Tuple[str, ...], step2_only: bool) -> Dict[str, Any]:
     """6축 + 2단계 추가 통계용 Plotly Figure들 생성 (캐시됨). 반환: axes dict + step2 list."""
     import plotly.graph_objects as go
@@ -2916,15 +2917,20 @@ def page_step2_results():
         with st.expander(row_label):
             st.checkbox("이 항목 삭제에 포함", key=f"step2_del_cb_{idx}")
             st.caption(f"추가된 컬럼: {', '.join(added[:8])}{' ...' if len(added) > 8 else ''}")
-            # 지연 로딩: 버튼 클릭 시에만 엑셀 로드 (페이지 마비 방지)
+            # 지연 로딩: 단일 미리보기만 유지 (다른 미리보기 캐시 삭제 → 메모리 절약)
             preview_key = f"step2_show_preview_{idx}"
             df_cache_key = f"step2_preview_df_{idx}"
             if st.button("데이터 미리보기", key=f"step2_preview_btn_{idx}", type="secondary"):
+                for k in list(st.session_state.keys()):
+                    if (k.startswith("step2_preview_df_") or k.startswith("step2_show_preview_")) and k != df_cache_key and k != preview_key:
+                        del st.session_state[k]
                 st.session_state[preview_key] = True
+                st.rerun()
             if st.session_state.get(preview_key):
                 if df_cache_key not in st.session_state:
                     try:
                         st.session_state[df_cache_key] = pd.read_excel(excel_path, engine="openpyxl")
+                        gc.collect()
                     except Exception as e:
                         st.warning(f"데이터 로드 실패: {e}")
                 if df_cache_key in st.session_state:
@@ -3622,6 +3628,18 @@ def main():
             if st.session_state.get("db_init_error"):
                 st.error("Supabase 설정을 확인해주세요. " + st.session_state["db_init_error"])
         return
+
+    # 사이드바: 메모리 정리 버튼 (캐시·GC로 장시간 실행 시 메모리 절약)
+    with st.sidebar:
+        st.caption("시스템")
+        if st.button("🗑️ 메모리 정리", key="mem_clear_btn", use_container_width=True):
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            gc.collect()
+            st.success("캐시 및 메모리 정리를 실행했습니다.")
+            st.rerun()
 
     # 페이지 전환 시 컨테이너는 각 _run_page_* 내부에서 empty() 후 채움
     # st.navigation: 페이지 전환 시 st.rerun() 없이 전환되어 깜빡임·지연 최소화
