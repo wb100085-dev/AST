@@ -273,3 +273,124 @@ class GeminiClient:
             contents=prompt,
         )
         return (resp.text or "").strip()
+
+    def generate_interview_answer(
+        self,
+        question_text: str,
+        person: Dict[str, Any],
+        interview_type: str = "FGI",
+    ) -> str:
+        """
+        심층면접 질문에 대해 한 명의 가상 패널이 답하는 내용을 생성.
+        person: 가상이름, 연령, 성별, 거주지역, 경제활동, 교육정도, 월평균소득, 페르소나, 현시대 반영 등.
+        진짜 사람이 말하듯 상세하고 자연스러운 대답을 반환.
+        """
+        name = person.get("가상이름", "응답자")
+        age = person.get("연령", "")
+        gender = person.get("성별", "")
+        region = person.get("거주지역", "")
+        econ = person.get("경제활동", "")
+        edu = person.get("교육정도", "")
+        income = person.get("월평균소득", "")
+        persona = (person.get("페르소나") or "").strip() or "(없음)"
+        reflection = (person.get("현시대 반영") or "").strip() or "(없음)"
+
+        profile = f"""
+- 이름: {name}
+- 연령: {age}세
+- 성별: {gender}
+- 거주지역: {region}
+- 경제활동: {econ}
+- 교육정도: {edu}
+- 월평균소득: {income}
+- 페르소나: {persona}
+- 현시대 반영(관심·트렌드 키워드): {reflection}
+""".strip()
+
+        prompt = f"""당신은 심층면접에서 한 명의 응답자가 모더레이터 질문에 답하는 장면을 재현하는 역할을 합니다.
+
+[가상 응답자 프로필]
+{profile}
+
+[모더레이터 질문]
+{question_text}
+
+[요구사항]
+1. 위 프로필과 페르소나, 현시대 반영을 바탕으로 **이 인물이 실제로 말할 법한** 답변을 작성하세요.
+2. 진짜 사람이 심층면접에 참여한 것처럼 **구체적이고 상세하게** 답하세요. (2~5문장 이상, 상황에 따라 더 길게)
+3. 말투는 자연스럽고, 개인 경험·감정·의견이 드러나도록 하세요. 단순한 예/아니오가 아닌 서술형으로.
+4. 다른 설명 없이 **응답자의 대답 본문만** 출력하세요.
+"""
+        try:
+            resp = self._client.models.generate_content(
+                model=self._model,
+                contents=prompt,
+            )
+            return (resp.text or "").strip()
+        except Exception:
+            return "(응답 생성 중 오류가 발생했습니다.)"
+
+    def generate_interview_report_analysis(
+        self,
+        questions_answers: list,
+        interview_type: str = "FGI",
+    ) -> Dict[str, str]:
+        """
+        심층면접 질문별 패널 응답 전체를 바탕으로 상세분석·결론 및 시사점 생성.
+        questions_answers: [ {"question": str, "answers": [ {"name": str, "answer": str } ] }, ... ]
+        반환: {"상세분석": str, "결과및전략": str}
+        """
+        lines = []
+        for i, qa in enumerate(questions_answers[:30], 1):
+            q = qa.get("question", "")
+            answers = qa.get("answers", [])
+            lines.append(f"[질문 {i}] {q}")
+            for a in answers:
+                name = a.get("name", "응답자")
+                ans = a.get("answer", "")
+                lines.append(f"  - {name}: {ans[:500]}{'…' if len(ans) > 500 else ''}")
+            lines.append("")
+        context = "\n".join(lines)
+
+        prompt = f"""다음은 심층면접에서 모더레이터 질문에 대한 가상 패널 응답 요약입니다.
+
+{context[:12000]}
+
+위 내용을 바탕으로 다음 두 가지를 작성해 주세요.
+
+1. **상세분석**: 공통 패턴, 의견 차이, 핵심 인사이트, 타깃 그룹별 특성 등을 3~5문단으로 정리.
+2. **결론 및 시사점**: 종합 결론, 시장성·수요에 대한 시사점, 실행 방안을 2~4문단으로 제안.
+
+출력 형식 (따옴표 없이):
+---
+[상세분석]
+(내용)
+
+[결론 및 시사점]
+(내용)
+---
+"""
+        try:
+            resp = self._client.models.generate_content(
+                model=self._model,
+                contents=prompt,
+            )
+            text = (resp.text or "").strip()
+            상세분석 = ""
+            결과및전략 = ""
+            if "[상세분석]" in text and "[결론 및 시사점]" in text:
+                parts = text.split("[결론 및 시사점]", 1)
+                상세분석 = parts[0].replace("[상세분석]", "").strip()
+                결과및전략 = parts[1].strip() if len(parts) > 1 else ""
+            elif "---" in text:
+                parts = text.split("---")
+                if len(parts) >= 2:
+                    상세분석 = parts[1].strip()
+                if len(parts) >= 3:
+                    결과및전략 = parts[2].strip()
+            else:
+                상세분석 = text[:4000]
+                결과및전략 = text[4000:] if len(text) > 4000 else ""
+            return {"상세분석": 상세분석, "결과및전략": 결과및전략}
+        except Exception:
+            return {"상세분석": "", "결과및전략": ""}

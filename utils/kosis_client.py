@@ -1,6 +1,7 @@
 # utils/kosis_client.py
 from __future__ import annotations
 
+import os
 import re
 import time
 import hashlib
@@ -14,6 +15,11 @@ import requests
 import numpy as np
 
 from utils.gemini_client import GeminiClient
+
+# 인터넷/클라우드 환경에서 KOSIS 연결 지연 시 타임아웃·재시도 (환경변수로 조정 가능)
+KOSIS_DEFAULT_TIMEOUT = int(os.environ.get("KOSIS_TIMEOUT", "60"))  # 기본 60초 (클라우드 대응)
+KOSIS_RETRY_COUNT = int(os.environ.get("KOSIS_RETRY_COUNT", "3"))
+KOSIS_RETRY_BACKOFF = float(os.environ.get("KOSIS_RETRY_BACKOFF", "2.0"))  # 2초, 4초, 8초
 
 
 # ========================================
@@ -94,9 +100,18 @@ class StatItem:
 
 
 class KosisClient:
-    def __init__(self, cache_ttl_seconds: int = 3600, timeout_seconds: int = 30, use_gemini: bool = True):
+    def __init__(
+        self,
+        cache_ttl_seconds: int = 3600,
+        timeout_seconds: Optional[int] = None,
+        use_gemini: bool = True,
+        retry_count: int = KOSIS_RETRY_COUNT,
+        retry_backoff: float = KOSIS_RETRY_BACKOFF,
+    ):
         self.cache_ttl = cache_ttl_seconds
-        self.timeout = timeout_seconds
+        self.timeout = timeout_seconds if timeout_seconds is not None else KOSIS_DEFAULT_TIMEOUT
+        self.retry_count = max(1, retry_count)
+        self.retry_backoff = retry_backoff
         self._cache: Dict[str, Tuple[float, Any]] = {}
 
         self.use_gemini = bool(use_gemini)
@@ -116,15 +131,28 @@ class KosisClient:
             if now - ts <= self.cache_ttl:
                 return data
 
-        resp = requests.get(url, timeout=self.timeout)
-        resp.raise_for_status()
+        last_error: Optional[Exception] = None
+        for attempt in range(self.retry_count):
+            try:
+                resp = requests.get(url, timeout=self.timeout)
+                resp.raise_for_status()
+                data = resp.json()
+                if not isinstance(data, list):
+                    data = data.get("data", []) if isinstance(data, dict) else []
+                self._cache[key] = (now, data)
+                return data
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout) as e:
+                last_error = e
+                if attempt < self.retry_count - 1:
+                    time.sleep(self.retry_backoff ** attempt)
+            except (requests.exceptions.RequestException, ValueError) as e:
+                last_error = e
+                if attempt < self.retry_count - 1:
+                    time.sleep(self.retry_backoff ** attempt)
 
-        data = resp.json()
-        if not isinstance(data, list):
-            data = data.get("data", []) if isinstance(data, dict) else []
-
-        self._cache[key] = (now, data)
-        return data
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("KOSIS 데이터 가져오기 실패 (재시도 소진)")
 
     def extract_sigungu_list_from_population_table(
         self,

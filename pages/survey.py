@@ -802,6 +802,26 @@ def _get_open_ended_key_points(response_df: pd.DataFrame, question_num: int, que
         return [{"번호": i, "요점": real[i - 1][:200] if i <= len(real) else "(요점 없음)"} for i in range(1, 6)]
 
 
+def _parse_interview_guide_questions(guide_markdown: str) -> list[str]:
+    """모더레이터 질문 가이드 마크다운에서 질문 문장만 추출. 번호 목록(1. 2. ...) 또는 - 목록."""
+    if not (guide_markdown or "").strip():
+        return []
+    questions = []
+    for line in guide_markdown.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # "1. 질문내용", "2. 질문내용" ...
+        if re.match(r"^\d+\.\s+", line):
+            q = re.sub(r"^\d+\.\s+", "", line).strip()
+            if q and len(q) > 3:
+                questions.append(q)
+        # "- 질문내용"
+        elif line.startswith("- ") and len(line) > 3:
+            questions.append(line[2:].strip())
+    return questions[:30]  # 최대 30개
+
+
 def _survey_overview_text(n_respondents: int, selected_sido_label: str, hypotheses: list) -> str:
     """조사 개요: 목적·대상(표본·추출방법)·기간·분석방법론."""
     from datetime import datetime
@@ -1600,9 +1620,121 @@ def _render_interview_subpage():
                 st.session_state.survey_design_subpage = ""
             st.rerun()
 
-    # AI 심층면접 진행 실행 화면 (추후 구현)
+    # AI 심층면접 진행 실행 화면 — 결과 페이지 (설문 결과 양식에 맞춘 심층면접 커스텀)
     if st.session_state.get("survey_interview_flow_page") == "ai_interview_conduct":
-        st.info("AI 심층면접 진행 화면은 추후 구현 예정입니다. 상단 **이전페이지**로 돌아가 옵션을 다시 선택할 수 있습니다.")
+        selected_persons = st.session_state.get("survey_interview_selected_persons") or []
+        guide_markdown = st.session_state.get("interview_guide_markdown", "")
+        interview_results = st.session_state.get("survey_interview_results")  # list of {question, answers: [{name, answer}]}
+        report_analysis = st.session_state.get("survey_interview_report_analysis") or {"상세분석": "", "결과및전략": ""}
+
+        # 결과 미생성 시: 모더레이터 질문 파싱 → 질문별·패널별 답변 생성 → 상세분석/결론 생성
+        if not interview_results and selected_persons and guide_markdown:
+            questions_list = _parse_interview_guide_questions(guide_markdown)
+            if not questions_list:
+                st.warning("생성된 모더레이터 질문 가이드에서 질문을 추출하지 못했습니다. **이전페이지**에서 질문 가이드를 확인한 뒤 다시 진행해 주세요.")
+            else:
+                with st.spinner("심층면접 응답을 생성하고 있습니다. 선택한 패널이 질문에 답변하는 중…"):
+                    try:
+                        client = GeminiClient()
+                        interview_type = st.session_state.get("interview_type", "FGI (Focus Group Interview)")
+                        type_key = "FGI" if "FGI" in interview_type else ("FGD" if "FGD" in interview_type else "IDI")
+                        results = []
+                        for q_num, q_text in enumerate(questions_list, 1):
+                            answers = []
+                            for person in selected_persons:
+                                ans = client.generate_interview_answer(q_text, person, interview_type=type_key)
+                                name = person.get("가상이름", "응답자")
+                                answers.append({"name": name, "answer": ans})
+                            results.append({"question_num": q_num, "question": q_text, "answers": answers})
+                        st.session_state.survey_interview_results = results
+                        # 상세분석·결론 생성
+                        qa_for_analysis = [{"question": r["question"], "answers": [{"name": a["name"], "answer": a["answer"]} for a in r["answers"]]} for r in results]
+                        analysis = client.generate_interview_report_analysis(qa_for_analysis, interview_type=type_key)
+                        st.session_state.survey_interview_report_analysis = analysis
+                    except Exception as e:
+                        st.error(f"심층면접 응답 생성 중 오류: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                    st.rerun()
+        elif not selected_persons:
+            st.warning("선택된 가상 패널이 없습니다. **이전페이지**에서 가상인구를 선택한 뒤 **AI 심층면접 진행**을 다시 눌러 주세요.")
+            return
+        elif not guide_markdown:
+            st.warning("생성된 모더레이터 질문 가이드가 없습니다. **이전페이지**에서 **모더레이터 질문 가이드 생성**을 먼저 실행해 주세요.")
+            return
+
+        # ——— 심층면접 결과 페이지 (설문 응답 결과와 동일한 6개 섹션 구조, 심층면접 커스텀) ———
+        st.markdown("### 심층면접 결과")
+        n_panel = len(selected_persons)
+        interview_type_label = st.session_state.get("interview_type", "FGI (Focus Group Interview)")
+
+        # 1. 심층면접 개요 및 질문 가이드
+        with st.expander("**1. 심층면접 개요 및 전체 질문 가이드**", expanded=True):
+            st.markdown("#### 조사 개요")
+            st.markdown(f"""
+**조사 목적**  
+시장성·수요 파악 및 설정된 가설 검증을 위한 심층면접
+
+**조사 대상(참여 패널)**  
+- 참여 인원: **{n_panel}명**  
+- 인터뷰 방식: **{interview_type_label}**  
+- 추출: AI 가상인구(가상 패널) DB에서 선택된 가상인구
+
+**분석 방법론**  
+- 모더레이터 질문 가이드에 따른 패널별 서술형 응답 생성  
+- AI(Gemini) 기반 응답 합성(페르소나·현시대 반영 반영) 및 상세분석
+""")
+            st.markdown("---")
+            st.markdown("#### 생성된 모더레이터 질문 가이드 (전체)")
+            st.markdown(guide_markdown or "(질문 가이드 없음)")
+
+        # 2. 참여 패널 특성
+        with st.expander("**2. 참여 패널 특성 — 성별·연령·지역 등 인구통계학적 배경**", expanded=True):
+            if selected_persons:
+                panel_df = pd.DataFrame(selected_persons)
+                _render_panel_summary_and_charts(panel_df, key_prefix="interview_panel")
+            else:
+                st.info("패널 정보가 없습니다.")
+
+        # 3. 심층면접 결과 — 질문별 패널 상세 대답
+        with st.expander("**3. 심층면접 결과 — 질문별 패널 상세 응답**", expanded=True):
+            for r in (interview_results or []):
+                st.markdown(f"**질문 {r.get('question_num', 0)}**")
+                st.markdown(r.get("question", ""))
+                st.caption("---")
+                for a in r.get("answers", []):
+                    st.markdown(f"**{a.get('name', '응답자')}**")
+                    st.markdown(a.get("answer", "(응답 없음)"))
+                    st.markdown("")
+                st.markdown("---")
+            st.caption("위 응답은 선택된 가상 패널의 페르소나·현시대 반영을 바탕으로 AI가 생성한 심층면접 시뮬레이션 결과입니다.")
+
+        # 4. 상세분석
+        with st.expander("**4. 상세분석 — 공통 패턴·의견 차이·핵심 인사이트**", expanded=True):
+            st.markdown(report_analysis.get("상세분석") or "(상세분석 내용이 없습니다. AI 심층면접 진행을 다시 실행해 주세요.)")
+
+        # 5. 결론 및 시사점
+        with st.expander("**5. 결론 및 시사점 — 종합 결론·시장성 시사점·실행방안**", expanded=True):
+            st.markdown(report_analysis.get("결과및전략") or "(결과 및 시사점 내용이 없습니다.)")
+
+        # 6. 응답 원본 (질문별 요약 테이블)
+        with st.expander("**6. 심층면접 응답 요약 — 질문별 응답자·답변 요약**", expanded=False):
+            if interview_results:
+                rows = []
+                for r in interview_results:
+                    q_num = r.get("question_num", 0)
+                    q_text = (r.get("question", "") or "")[:80] + ("…" if len(r.get("question", "")) > 80 else "")
+                    for a in r.get("answers", []):
+                        rows.append({"질문번호": q_num, "질문": q_text, "응답자": a.get("name", ""), "답변요약": (a.get("answer", "") or "")[:200] + ("…" if len(a.get("answer", "")) > 200 else "")})
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("응답 데이터가 없습니다.")
+
+        st.markdown("---")
+        if st.button("이전페이지 (옵션 선택으로)", key="interview_conduct_back", type="secondary"):
+            st.session_state.survey_interview_flow_page = "ai_interview_options"
+            st.rerun()
         return
 
     # AI 심층면접 진행 옵션 선택 페이지 (가상인구 선택 + 선택 요약 및 진행만 표시)
