@@ -1969,33 +1969,28 @@ def _render_interview_subpage():
     IDI = "IDI (Individual Depth Interview)"
     current = st.session_state.get("interview_type", FGI)
 
-    # 이미지 경로 (프로젝트 루트 기준, 실행 경로에 따라 후보 추가)
+    # 이미지 경로 (프로젝트 루트 기준, 배포·로컬 동일하게 대소문자 후보 적용)
     import os
     _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _img_dir = os.path.join(_root, "assets", "interview_methods")
-    def _img_path(name):
-        p = os.path.join(_img_dir, name)
-        if os.path.isfile(p):
-            return p
-        # 실행 디렉터리가 프로젝트 루트인 경우
-        alt = os.path.join(os.getcwd(), "assets", "interview_methods", name)
-        return alt if os.path.isfile(alt) else p
-    _fgi_img = _img_path("fgi.png")
-    _fgd_img = _img_path("fgd.png")
-    _idi_img = _img_path("idi.png")
-    _has_all = os.path.isfile(_fgi_img) and os.path.isfile(_fgd_img) and os.path.isfile(_idi_img)
-    if not _has_all:
-        st.info(
-            "각 인터뷰 방식에 그림을 넣으려면 프로젝트 폴더 **assets/interview_methods/** 에 "
-            "다음 파일을 넣어주세요: **fgi.png**(FGI), **fgd.png**(FGD), **idi.png**(IDI). "
-            "첨부하신 사진 순서대로 1번→fgi.png, 2번→fgd.png, 3번→idi.png 로 저장하면 됩니다."
-        )
+    def _img_path(*candidates):
+        for name in candidates:
+            p = os.path.join(_img_dir, name)
+            if os.path.isfile(p):
+                return p
+            alt = os.path.join(os.getcwd(), "assets", "interview_methods", name)
+            if os.path.isfile(alt):
+                return alt
+        return None
+    _fgi_img = _img_path("FGI.png", "fgi.png")
+    _fgd_img = _img_path("FGD.png", "fgd.png")
+    _idi_img = _img_path("IDI.png", "idi.png")
 
     # 설명 영역 (3열): 각 방식 설명 보기 위에 이미지 배치 (비율 유지, 가로는 열 너비에 맞춤)
     col_fgi, col_fgd, col_idi = st.columns(3)
     with col_fgi:
         st.markdown("**1. FGI** (Focus Group Interview)")
-        if os.path.isfile(_fgi_img):
+        if _fgi_img:
             st.image(_fgi_img, use_container_width=True)
         with st.expander("방식 설명 보기", expanded=True):
             st.caption(
@@ -2006,7 +2001,7 @@ def _render_interview_subpage():
             )
     with col_fgd:
         st.markdown("**2. FGD** (Focus Group Discussion)")
-        if os.path.isfile(_fgd_img):
+        if _fgd_img:
             st.image(_fgd_img, use_container_width=True)
         with st.expander("방식 설명 보기", expanded=True):
             st.caption(
@@ -2017,7 +2012,7 @@ def _render_interview_subpage():
             )
     with col_idi:
         st.markdown("**3. IDI** (Individual Depth Interview)")
-        if os.path.isfile(_idi_img):
+        if _idi_img:
             st.image(_idi_img, use_container_width=True)
         with st.expander("방식 설명 보기", expanded=True):
             st.caption(
