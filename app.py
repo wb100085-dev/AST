@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import time
 import traceback
 import pickle
 import json
@@ -73,16 +74,32 @@ from core.session_cache import (
 )
 
 
+# KOSIS 타임아웃·재시도 (인터넷/클라우드 환경 대응, kosis_client와 동일)
+_KOSIS_TIMEOUT = int(os.environ.get("KOSIS_TIMEOUT", "60"))
+_KOSIS_RETRY = int(os.environ.get("KOSIS_RETRY_COUNT", "3"))
+_KOSIS_BACKOFF = float(os.environ.get("KOSIS_RETRY_BACKOFF", "2.0"))
+
+
 @st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=2)
 def get_cached_kosis_json(url: str) -> list:
-    """KOSIS API JSON 결과를 24시간 캐시. fetch_json 대체용."""
+    """KOSIS API JSON 결과를 24시간 캐시. fetch_json 대체용. 타임아웃 60초·재시도 3회 적용."""
     import requests
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    if not isinstance(data, list):
-        data = data.get("data", []) if isinstance(data, dict) else []
-    return data
+    last_error = None
+    for attempt in range(max(1, _KOSIS_RETRY)):
+        try:
+            resp = requests.get(url, timeout=_KOSIS_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, list):
+                data = data.get("data", []) if isinstance(data, dict) else []
+            return data
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout, requests.exceptions.RequestException, ValueError) as e:
+            last_error = e
+            if attempt < _KOSIS_RETRY - 1:
+                time.sleep(_KOSIS_BACKOFF ** attempt)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("KOSIS 데이터 가져오기 실패 (재시도 소진)")
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS, max_entries=2)
