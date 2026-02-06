@@ -28,10 +28,13 @@ def page_psm():
 
     st.markdown("---")
     
-    # 데이터 입력 방식 선택
+    # 데이터 입력 방식 선택 (설문 응답 결과가 있으면 해당 옵션 추가)
+    psm_mode_options = ["가상 데이터 생성", "직접 입력", "CSV 파일 업로드"]
+    if use_real_data and real_data_df is not None and len(real_data_df) > 0:
+        psm_mode_options = ["AI 설문 응답 결과 사용"] + psm_mode_options
     data_mode = st.radio(
         "데이터 입력 방식",
-        options=["가상 데이터 생성", "직접 입력", "CSV 파일 업로드"],
+        options=psm_mode_options,
         key="psm_data_mode"
     )
     
@@ -56,7 +59,35 @@ def page_psm():
     # 데이터 준비
     psm_data = None
     
-    if data_mode == "가상 데이터 생성":
+    if data_mode == "AI 설문 응답 결과 사용" and use_real_data and real_data_df is not None:
+        st.info("💡 불러온 AI 설문 응답 결과로 PSM(가격 민감도) 분석을 진행합니다.")
+        with st.expander("데이터 미리보기"):
+            st.dataframe(real_data_df.head(20), use_container_width=True, height=300)
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            too_cheap_col = st.selectbox("너무 쌈 컬럼", options=real_data_df.columns.tolist(), key="psm_survey_tc_col")
+        with col2:
+            cheap_col = st.selectbox("쌈 컬럼", options=real_data_df.columns.tolist(), key="psm_survey_c_col")
+        with col3:
+            expensive_col = st.selectbox("비쌈 컬럼", options=real_data_df.columns.tolist(), key="psm_survey_e_col")
+        with col4:
+            too_expensive_col = st.selectbox("너무 비쌈 컬럼", options=real_data_df.columns.tolist(), key="psm_survey_te_col")
+        if st.button("설문 응답 데이터로 PSM 분석 적용", key="psm_apply_survey"):
+            psm_data = pd.DataFrame({
+                'too_cheap': pd.to_numeric(real_data_df[too_cheap_col], errors='coerce'),
+                'cheap': pd.to_numeric(real_data_df[cheap_col], errors='coerce'),
+                'expensive': pd.to_numeric(real_data_df[expensive_col], errors='coerce'),
+                'too_expensive': pd.to_numeric(real_data_df[too_expensive_col], errors='coerce')
+            }).dropna()
+            if len(psm_data) > 0:
+                st.session_state.psm_data = psm_data
+                st.success(f"✅ 설문 응답 {len(psm_data)}명 데이터로 PSM 분석을 적용했습니다.")
+            else:
+                st.error("매핑한 컬럼에 유효한 숫자 데이터가 없습니다.")
+        if 'psm_data' in st.session_state and st.session_state.psm_data is not None:
+            psm_data = st.session_state.psm_data
+    
+    elif data_mode == "가상 데이터 생성":
         col1, col2 = st.columns(2)
         with col1:
             n_respondents = st.number_input("응답자 수", min_value=10, max_value=10000, value=100, step=10, key="psm_n_respondents")

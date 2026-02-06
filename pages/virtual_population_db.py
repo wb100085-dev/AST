@@ -9,7 +9,9 @@ import streamlit as st
 import os
 import time
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import pandas as pd
 from core.constants import SIDO_LABEL_TO_CODE, SIDO_CODE_TO_NAME, SIDO_MASTER, SIDO_TOTAL_POP
 from core.db import (
     get_sido_vdb_stats,
@@ -40,6 +42,81 @@ def _vdb_update_cached_record(sido_code: str, record_id: int, new_data_json: str
     cached = st.session_state.get(key) or []
     new_list = [(rid, new_data_json if rid == record_id else js) for (rid, js) in cached]
     st.session_state[key] = new_list
+
+
+PERSONA_BATCH_SIZE = 80  # 청크 단위 (50~100명)
+PERSONA_MAX_WORKERS = 10  # 동시 LLM 호출 수
+PERSONA_RETRY_COUNT = 2
+PERSONA_DELAY_SEC = 0.1  # Rate limit 완화용
+
+LEARN_CHUNK_SIZE = 80  # 현시대 반영 청크 단위 (50~100명)
+LEARN_MAX_WORKERS = 10
+LEARN_RETRY_COUNT = 2
+LEARN_DELAY_SEC = 0.1
+
+
+def _generate_one_reflection_task(person_item: dict, combined_content: str, gemini_client) -> tuple:
+    """한 명의 현시대 반영 생성 (ThreadPoolExecutor용). 반환: (record_id, row_idx, text). 실패 시 text=''."""
+    time.sleep(LEARN_DELAY_SEC)
+    record_id = person_item["record_id"]
+    row_idx = person_item["row_idx"]
+    row = person_item["row"]
+    profile_parts = []
+    for c in ["거주지역", "성별", "연령", "경제활동", "교육정도", "월평균소득", "가상이름"]:
+        if c in row and pd.notna(row.get(c)):
+            profile_parts.append(f"{c}: {row[c]}")
+    persona = str(row.get("페르소나", "")).strip()
+    if persona and persona not in ("", "nan"):
+        profile_parts.append(f"페르소나: {persona[:150]}")
+    profile_str = "\n".join(profile_parts) if profile_parts else "특성 없음"
+    prompt = f"""다음은 '현시대 자료'입니다.
+---
+{combined_content[:8000]}
+---
+아래 가상인물의 페르소나와 특성을 고려하여, 이 인물의 관심분야에 맞는 내용만 선택적으로 반영하세요.
+관련도가 높으면 100자 내외로 한 문장으로 '현시대 반영' 문장을 작성하고, 관련도가 낮으면 빈 문자열만 반환하세요.
+반드시 100자 내외, 한 문장으로만 출력하고 다른 설명은 하지 마세요. (짤리지 않도록 100자 이하로 작성)
+
+가상인물 정보:
+{profile_str}
+
+현시대 반영 (100자 내외 한 문장, 또는 관련 없으면 빈칸):"""
+    for attempt in range(LEARN_RETRY_COUNT + 1):
+        try:
+            resp = gemini_client._client.models.generate_content(model=gemini_client._model, contents=prompt)
+            text = (resp.text or "").strip()
+            if "현시대 반영" in text and ":" in text:
+                text = text.split(":", 1)[-1].strip()
+            if len(text) > 200:
+                text = text[:200]
+            return (record_id, row_idx, text)
+        except Exception:
+            if attempt < LEARN_RETRY_COUNT:
+                time.sleep(0.5 * (attempt + 1))
+            else:
+                return (record_id, row_idx, "")
+
+
+def _generate_one_persona_task(item: dict, gemini_client) -> tuple:
+    """한 명의 페르소나 생성 (ThreadPoolExecutor용). 반환: (record_id, row_idx, persona_text). 실패 시 persona_text=''."""
+    time.sleep(PERSONA_DELAY_SEC)
+    rid, row_idx = item["record_id"], item["row_idx"]
+    persona_info = item.get("persona_info") or {}
+    prompt = (
+        "다음 가상인물의 특성 정보를 바탕으로 이 인물의 페르소나를 200자 이내 서술형으로 작성해주세요.\n특성 정보:\n"
+        + "\n".join([f"- {k}: {v}" for k, v in persona_info.items()])
+        + "\n\n페르소나 (200자 이내):"
+    )
+    for attempt in range(PERSONA_RETRY_COUNT + 1):
+        try:
+            resp = gemini_client._client.models.generate_content(model=gemini_client._model, contents=prompt)
+            text = (resp.text or "").strip()[:200]
+            return (rid, row_idx, text)
+        except Exception:
+            if attempt < PERSONA_RETRY_COUNT:
+                time.sleep(0.5 * (attempt + 1))
+            else:
+                return (rid, row_idx, "")
 
 
 def _vdb_update_cached_records_batch(sido_code: str, record_dfs: dict) -> None:
@@ -261,17 +338,14 @@ def page_virtual_population_db():
         map_sido_code = query_sido or SIDO_LABEL_TO_CODE.get(current_label, "37")
         sido_master = _cached_sido_master()
         sido_options = [f"{s['sido_name']} ({s['sido_code']})" for s in sido_master]
-        default_label = st.session_state.get("vdb_sido_select") or st.session_state.get("selected_sido_label", "경상북도 (37)")
-        default_idx = sido_options.index(default_label) if default_label in sido_options else 0
 
         # 상단 2분할: 왼쪽(5) 지도+선택정보(세로 8:2), 오른쪽(5) 가상인구 DB
         col_left, col_db = st.columns([5, 5])
         with col_left:
-            # 셀렉트박스: key로 vdb_sido_select와 연동, 지도 클릭 시 위에서 세션 갱신되어 동기화
+            # 셀렉트박스: key로 vdb_sido_select와 연동, 지도 클릭 시 위에서 세션 갱신되어 동기화 (index 미사용으로 세션 충돌 방지)
             selected_sido_label = st.selectbox(
                 "지역 선택",
                 options=sido_options,
-                index=default_idx,
                 key="vdb_sido_select",
             )
             map_sido_code = SIDO_LABEL_TO_CODE.get(selected_sido_label, map_sido_code)
@@ -524,35 +598,37 @@ def page_virtual_population_db():
                                     st.rerun()
                                 else:
                                     gemini_client = GeminiClient()
-                                    batch_size = 1  # 1명씩 처리 후 rerun → 중지 버튼 클릭 시 최대 1건만 더 진행되고 즉시 중단
-                                    batch_end = min(next_index + batch_size, total_work)
+                                    batch_end = min(next_index + PERSONA_BATCH_SIZE, total_work)
                                     progress_bar = st.progress(next_index / total_work if total_work else 0)
                                     status_placeholder = st.empty()
                                     cache_key = f"vdb_cached_jsons_{selected_sido_code}"
                                     id_to_json = {rid: js for (rid, js) in (st.session_state.get(cache_key) or [])}
+                                    batch_items = [work_queue[i] for i in range(next_index, batch_end)]
+                                    unique_rids = list(dict.fromkeys([item["record_id"] for item in batch_items]))
                                     record_dfs = {}
-                                    for i in range(next_index, batch_end):
-                                        item = work_queue[i]
-                                        persona_info = item["persona_info"]
-                                        prompt = f"다음 가상인물의 특성 정보를 바탕으로 이 인물의 페르소나를 200자 이내 서술형으로 작성해주세요.\n특성 정보:\n" + "\n".join([f"- {k}: {v}" for k, v in persona_info.items()]) + "\n\n페르소나 (200자 이내):"
-                                        try:
-                                            resp = gemini_client._client.models.generate_content(model=gemini_client._model, contents=prompt)
-                                            persona_text = (resp.text or "").strip()[:200]
-                                        except Exception:
-                                            persona_text = ""
-                                        rid, row_idx = item["record_id"], item["row_idx"]
-                                        if rid not in record_dfs:
-                                            data_json = id_to_json.get(rid) or get_virtual_population_db_data_json(rid)
-                                            if data_json:
-                                                df = pd.read_json(data_json, orient="records")
-                                                if "페르소나" not in df.columns:
-                                                    df["페르소나"] = ""
-                                                record_dfs[rid] = df
-                                        if rid in record_dfs:
-                                            record_dfs[rid].at[row_idx, "페르소나"] = persona_text
-                                        status_placeholder.caption(f"처리 중: {batch_end}/{total_work}명")
-                                        progress_bar.progress(batch_end / total_work)
-                                    # 실시간 Supabase 업로드 대신 캐시만 갱신 → 나중에 '기록을 DB에 추가'로 반영
+                                    for rid in unique_rids:
+                                        data_json = id_to_json.get(rid) or get_virtual_population_db_data_json(rid)
+                                        if data_json:
+                                            df = pd.read_json(data_json, orient="records")
+                                            if "페르소나" not in df.columns:
+                                                df["페르소나"] = ""
+                                            record_dfs[rid] = df
+                                    # 2) 청크 단위 병렬 페르소나 생성 (ThreadPoolExecutor)
+                                    completed = 0
+                                    with ThreadPoolExecutor(max_workers=PERSONA_MAX_WORKERS) as executor:
+                                        futures = {executor.submit(_generate_one_persona_task, item, gemini_client): item for item in batch_items}
+                                        for fut in as_completed(futures):
+                                            if st.session_state.get("persona_generation_stop"):
+                                                break
+                                            try:
+                                                rid, row_idx, persona_text = fut.result()
+                                                if rid in record_dfs:
+                                                    record_dfs[rid].at[row_idx, "페르소나"] = persona_text
+                                            except Exception:
+                                                pass
+                                            completed += 1
+                                            status_placeholder.caption(f"처리 중: {next_index + completed}/{total_work}명")
+                                            progress_bar.progress((next_index + completed) / total_work)
                                     _vdb_update_cached_records_batch(selected_sido_code, record_dfs)
                                     st.session_state.persona_next_index = batch_end
                                     if batch_end >= total_work:
@@ -851,8 +927,7 @@ def page_virtual_population_db():
                         st.session_state.learn_total_done = 0  # 누적 처리 인원
                         st.rerun()
             
-                # 전체 학습 실행 중일 때 — 10명씩 처리 후 rerun (무한 로딩 방지)
-                LEARN_CHUNK_SIZE = 10
+                # 전체 학습 실행 중일 때 — 청크 단위 병렬 처리 후 rerun (무한 로딩 방지)
                 if st.session_state.learn_running and not st.session_state.learn_stop:
                     combined_content = st.session_state.get("learn_combined_content", "").strip()
                     run_sido = st.session_state.get("learn_sido_code", selected_sido_code)
@@ -893,53 +968,35 @@ def page_virtual_population_db():
                                     progress_bar = st.progress(0)
                                     status_placeholder = st.empty()
                                     total_done = st.session_state.get("learn_total_done", 0)
-                                    status_placeholder.caption(f"처리 중: 이번에 {len(chunk)}명 처리 (누적 {total_done + len(chunk)}명 / 남은 대상 {total_people}명)")
+                                    status_placeholder.caption(f"처리 중: 이번에 {len(chunk)}명 병렬 처리 (누적 예정 {total_done + len(chunk)}명 / 남은 대상 {total_people}명)")
                                     gemini_client = GeminiClient()
-                                    processed_this_run = 0
-                                    for person_item in chunk:
-                                        if st.session_state.learn_stop:
-                                            break
-                                        record_id = person_item["record_id"]
-                                        df = person_item["df"]
-                                        row_idx = person_item["row_idx"]
-                                        row = person_item["row"]
-                                        profile_parts = []
-                                        for c in ["거주지역", "성별", "연령", "경제활동", "교육정도", "월평균소득", "가상이름"]:
-                                            if c in row and pd.notna(row.get(c)):
-                                                profile_parts.append(f"{c}: {row[c]}")
-                                        persona = str(row.get("페르소나", "")).strip()
-                                        if persona and persona != "" and persona != "nan":
-                                            profile_parts.append(f"페르소나: {persona[:150]}")
-                                        profile_str = "\n".join(profile_parts) if profile_parts else "특성 없음"
-                                        prompt = f"""다음은 '현시대 자료'입니다.
-    ---
-    {combined_content[:8000]}
-    ---
-    아래 가상인물의 페르소나와 특성을 고려하여, 이 인물의 관심분야에 맞는 내용만 선택적으로 반영하세요.
-    관련도가 높으면 100자 내외로 한 문장으로 '현시대 반영' 문장을 작성하고, 관련도가 낮으면 빈 문자열만 반환하세요.
-    반드시 100자 내외, 한 문장으로만 출력하고 다른 설명은 하지 마세요. (짤리지 않도록 100자 이하로 작성)
-
-    가상인물 정보:
-    {profile_str}
-
-    현시대 반영 (100자 내외 한 문장, 또는 관련 없으면 빈칸):"""
-                                        try:
-                                            resp = gemini_client._client.models.generate_content(model=gemini_client._model, contents=prompt)
-                                            text = (resp.text or "").strip()
-                                            if "현시대 반영" in text and ":" in text:
-                                                text = text.split(":", 1)[-1].strip()
-                                            # 저장은 최대 200자까지 허용 (생성은 100자 내외이므로 짤림 없음)
-                                            if len(text) > 200:
-                                                text = text[:200]
-                                            df.at[row_idx, "현시대 반영"] = text
-                                        except Exception:
-                                            pass
+                                    record_dfs_learn = {}
+                                    for item in chunk:
+                                        rid = item["record_id"]
+                                        if rid not in record_dfs_learn:
+                                            record_dfs_learn[rid] = item["df"]
+                                    with ThreadPoolExecutor(max_workers=LEARN_MAX_WORKERS) as executor:
+                                        futures = {
+                                            executor.submit(_generate_one_reflection_task, person_item, combined_content, gemini_client): person_item
+                                            for person_item in chunk
+                                        }
+                                        completed = 0
+                                        for fut in as_completed(futures):
+                                            if st.session_state.learn_stop:
+                                                break
+                                            try:
+                                                record_id, row_idx, text = fut.result()
+                                                if record_id in record_dfs_learn:
+                                                    record_dfs_learn[record_id].at[row_idx, "현시대 반영"] = text
+                                            except Exception:
+                                                pass
+                                            completed += 1
+                                            progress_bar.progress(completed / len(chunk))
+                                            status_placeholder.caption(f"처리 중: 이번에 {completed}/{len(chunk)}명 (누적 예정 {total_done + completed}명)")
+                                    for rid, df in record_dfs_learn.items():
                                         new_json = df.to_json(orient="records", force_ascii=False)
-                                        # 실시간 Supabase 업로드 대신 캐시만 갱신 → 나중에 '기록을 DB에 추가'로 반영
-                                        _vdb_update_cached_record(run_sido, record_id, new_json)
-                                        processed_this_run += 1
-                                        progress_bar.progress(processed_this_run / len(chunk))
-                                
+                                        _vdb_update_cached_record(run_sido, rid, new_json)
+                                    processed_this_run = completed
                                     progress_bar.empty()
                                     status_placeholder.empty()
                                     st.session_state.learn_total_done = total_done + processed_this_run

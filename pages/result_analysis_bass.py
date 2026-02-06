@@ -28,10 +28,13 @@ def page_bass():
 
     st.markdown("---")
     
-    # 데이터 입력 방식 선택
+    # 데이터 입력 방식 선택 (설문 응답 결과가 있으면 해당 옵션 추가)
+    bass_mode_options = ["가상 데이터 생성", "직접 입력", "CSV 파일 업로드"]
+    if use_real_data and real_data_df is not None and len(real_data_df) > 0:
+        bass_mode_options = ["AI 설문 응답 결과 사용"] + bass_mode_options
     data_mode = st.radio(
         "데이터 입력 방식",
-        options=["가상 데이터 생성", "직접 입력", "CSV 파일 업로드"],
+        options=bass_mode_options,
         key="bass_data_mode"
     )
     
@@ -70,7 +73,31 @@ def page_bass():
     # 데이터 준비
     bass_data = None
     
-    if data_mode == "가상 데이터 생성":
+    if data_mode == "AI 설문 응답 결과 사용" and use_real_data and real_data_df is not None:
+        st.info("💡 불러온 AI 설문 응답 결과로 Bass 확산 모델 분석을 진행합니다. 기간·누적 채택자 수에 해당하는 컬럼을 매핑하세요.")
+        with st.expander("데이터 미리보기"):
+            st.dataframe(real_data_df.head(20), use_container_width=True, height=300)
+        col1, col2 = st.columns(2)
+        with col1:
+            period_col = st.selectbox("기간 컬럼", options=real_data_df.columns.tolist(), key="bass_survey_period_col")
+        with col2:
+            cumulative_col = st.selectbox("누적 채택자 수 컬럼", options=real_data_df.columns.tolist(), key="bass_survey_cumulative_col")
+        if st.button("설문 응답 데이터로 Bass 분석 적용", key="bass_apply_survey"):
+            bass_data = pd.DataFrame({
+                'period': pd.to_numeric(real_data_df[period_col], errors='coerce'),
+                'cumulative_adoptions': pd.to_numeric(real_data_df[cumulative_col], errors='coerce')
+            }).dropna()
+            bass_data = bass_data.sort_values('period').reset_index(drop=True)
+            if len(bass_data) >= 3:
+                bass_data['new_adoptions'] = np.diff(np.concatenate([[0], bass_data['cumulative_adoptions'].values]))
+                st.session_state.bass_data = bass_data
+                st.success(f"✅ 설문 응답 데이터 {len(bass_data)}개 기간으로 Bass 분석을 적용했습니다.")
+            else:
+                st.error("유효한 데이터가 부족합니다. 기간·누적 채택자 수 컬럼을 확인하세요. (최소 3개 기간 필요)")
+        if 'bass_data' in st.session_state and st.session_state.bass_data is not None:
+            bass_data = st.session_state.bass_data
+    
+    elif data_mode == "가상 데이터 생성":
         col1, col2, col3 = st.columns(3)
         with col1:
             market_potential = st.number_input("잠재 시장 크기 (m)", min_value=100, max_value=10000000, value=10000, step=100, key="bass_m")

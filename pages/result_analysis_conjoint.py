@@ -150,13 +150,13 @@ def page_conjoint_analysis():
     # 메인 대시보드 UI
     st.title("🚀 Conjoint Analysis Pro")
     if use_real_data and real_data_df is not None:
-        st.markdown(f"**실제 가상인구 데이터 활용** ({len(real_data_df)}명) - 고급 마케팅 선호도 분석 엔진")
+        st.markdown(f"**AI 설문 응답 결과 활용** ({len(real_data_df)}명) - 고급 마케팅 선호도 분석 엔진")
     else:
         st.markdown("가상 인구 100명의 데이터를 활용한 고급 마케팅 선호도 분석 엔진")
 
     # 데이터 생성 및 분석 실행
     if use_real_data and real_data_df is not None:
-        st.info("💡 실제 가상인구 데이터를 사용 중입니다. 분석에 사용할 속성(컬럼)을 선택하세요.")
+        st.info("💡 AI 설문 응답 결과를 사용 중입니다. 분석에 사용할 속성(컬럼)을 선택하세요.")
         
         available_columns = list(real_data_df.columns)
         selected_columns = st.multiselect(

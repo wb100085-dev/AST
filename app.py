@@ -3,6 +3,7 @@ AI Social Twin - 가상인구 생성 및 조사 설계 애플리케이션
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import traceback
@@ -18,6 +19,12 @@ import numpy as np
 
 # 캐시 유효시간: 24시간 (초)
 CACHE_TTL_SECONDS = 24 * 3600  # 86400
+
+
+def _hash_dataframe(df: pd.DataFrame) -> str:
+    """st.cache_data용 DataFrame 해시. 동일 데이터면 동일 해시."""
+    return hashlib.md5(df.to_json(orient="split").encode()).hexdigest()
+
 
 # 타입 검사용 (실제 로딩은 main()에서 지연 로딩)
 if TYPE_CHECKING:
@@ -54,6 +61,7 @@ from core.db import (
     build_stats_export_xlsx_kr,
     get_export_filename,
     import_stats_from_excel_kr,
+    get_sido_vdb_stats,
 )
 from core.session_cache import (
     get_cached_db_list_stats,
@@ -107,6 +115,15 @@ def _apply_step2_column_rename(df: pd.DataFrame) -> pd.DataFrame:
     """2단계 결과 컬럼명을 출력용으로 변경 (존재하는 컬럼만)."""
     rename = {k: v for k, v in STEP2_COLUMN_RENAME.items() if k in df.columns}
     return df.rename(columns=rename) if rename else df
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, hash_funcs={pd.DataFrame: _hash_dataframe})
+def _build_excel_bytes_for_download(df: pd.DataFrame, _is_step2: bool) -> bytes:
+    """다운로드 탭에서 요청 시에만 Excel 바이트 생성 (캐시됨)."""
+    buf = BytesIO()
+    df.to_excel(buf, index=False, engine="openpyxl")
+    buf.seek(0)
+    return buf.getvalue()
 
 
 def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
@@ -355,6 +372,14 @@ def _apply_step2_logical_consistency(df: pd.DataFrame) -> None:
             pass
 
 
+@st.cache_data(ttl=CACHE_TTL_SECONDS, hash_funcs={pd.DataFrame: _hash_dataframe})
+def _apply_step2_logical_consistency_cached(df: pd.DataFrame) -> pd.DataFrame:
+    """2단계 논리 일관성 적용 결과 반환 (캐시됨). 동일 df 입력 시 재계산 생략."""
+    out = df.copy()
+    _apply_step2_logical_consistency(out)
+    return out
+
+
 # -----------------------------
 # 4. UI Utilities
 # -----------------------------
@@ -503,12 +528,13 @@ def page_data_management():
             ("edu", "교육"),
         ]
 
-        # 캐시를 쓰지 않고 DB에서 직접 조회 (저장 직후 새로고침 시 최신값 반영)
-        from core.db import db_get_axis_margin_stats
+        # 6축 설정 한 번의 쿼리로 조회 (세션 캐시, 저장 시 무효화로 최신값 반영)
+        from core.session_cache import get_cached_db_all_axis_margin_stats
+        axis_margin_by_key = get_cached_db_all_axis_margin_stats(sido_code)
         selections = {}
         load_failed_count = 0
         for axis_key, axis_label in axis_list:
-            current_stat = db_get_axis_margin_stats(sido_code, axis_key)
+            current_stat = axis_margin_by_key.get(axis_key)
             current_id = None
             if current_stat and current_stat.get("stat_id") is not None:
                 try:
@@ -554,9 +580,8 @@ def page_data_management():
                 st.rerun()
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS)
-@st.cache_data(ttl=3600)
 def convert_kosis_to_distribution_cached(kosis_data_json: str, axis_key: str) -> Tuple[list, list]:
-    """KOSIS 데이터 변환 결과를 1시간 캐시. 동일 (데이터, 축)이면 재계산 생략."""
+    """KOSIS 데이터 변환 결과를 캐시. 동일 (데이터, 축)이면 재계산 생략."""
     kosis_data = json.loads(kosis_data_json) if kosis_data_json else []
     return _convert_kosis_to_distribution_impl(kosis_data, axis_key)
 
@@ -772,279 +797,197 @@ def convert_kosis_to_distribution(kosis_data, axis_key: str):
 
 
 # -----------------------------
-# 6. Chart Helper Functions
+# 6. Chart Helper Functions (캐싱으로 탭 전환 시 재계산 방지)
 # -----------------------------
-def draw_population_pyramid(df: pd.DataFrame):
-    """인구 피라미드 그래프 (성별·연령별 인구 구조) - 20세 이상만 표시"""
+@st.cache_data(ttl=CACHE_TTL_SECONDS, hash_funcs={pd.DataFrame: _hash_dataframe})
+def _build_population_pyramid_figure(df: pd.DataFrame):
+    """인구 피라미드용 Plotly Figure 생성 (캐시됨). 데이터 없으면 None."""
     import plotly.graph_objects as go
-    
+
     if "성별" not in df.columns or "연령" not in df.columns:
-        st.info("성별 또는 연령 데이터가 없습니다.")
-        return
-    
-    # 20세 미만 데이터 필터링
+        return None
     df_filtered = df[df["연령"] >= 20].copy()
-    
-    # 데이터 전처리: 성별별 연령대 카운트
     male_data = df_filtered[df_filtered["성별"].isin(["남자", "남"])].copy()
     female_data = df_filtered[df_filtered["성별"].isin(["여자", "여"])].copy()
-    
-    # 연령대별 카운트
     male_age_counts = male_data["연령"].value_counts().sort_index()
     female_age_counts = female_data["연령"].value_counts().sort_index()
-    
-    # 모든 연령대 통합 (20세 이상만)
     all_ages = sorted(set(male_age_counts.index) | set(female_age_counts.index))
     all_ages = [age for age in all_ages if 20 <= age <= 120]
-    
-    # 각 연령대별 남자/여자 인구수 (남자는 음수로 변환)
     male_counts = [-male_age_counts.get(age, 0) for age in all_ages]
     female_counts = [female_age_counts.get(age, 0) for age in all_ages]
-    
-    # 총 인구수 계산 (비율 계산용) - 필터링된 데이터 기준
     total_population = len(df_filtered)
-    
-    # 그래프 생성
     fig = go.Figure()
-    
-    # 남자 (왼쪽, 음수)
     fig.add_trace(go.Bar(
-        y=all_ages,
-        x=male_counts,
-        name='남자',
-        orientation='h',
-        marker=dict(color='rgba(31, 119, 180, 0.8)'),
-        hovertemplate='<b>남자</b><br>' +
-                      '연령: %{y}세<br>' +
-                      '인구수: %{customdata[0]:,}명<br>' +
-                      '비율: %{customdata[1]:.2f}%<extra></extra>',
-        customdata=[[abs(count), (abs(count) / total_population * 100) if total_population > 0 else 0] 
-                    for count in male_counts]
+        y=all_ages, x=male_counts, name="남자", orientation="h",
+        marker=dict(color="rgba(31, 119, 180, 0.8)"),
+        hovertemplate="<b>남자</b><br>연령: %{y}세<br>인구수: %{customdata[0]:,}명<br>비율: %{customdata[1]:.2f}%<extra></extra>",
+        customdata=[[abs(c), (abs(c) / total_population * 100) if total_population > 0 else 0] for c in male_counts],
     ))
-    
-    # 여자 (오른쪽, 양수)
     fig.add_trace(go.Bar(
-        y=all_ages,
-        x=female_counts,
-        name='여자',
-        orientation='h',
-        marker=dict(color='rgba(255, 127, 14, 0.8)'),
-        hovertemplate='<b>여자</b><br>' +
-                      '연령: %{y}세<br>' +
-                      '인구수: %{customdata[0]:,}명<br>' +
-                      '비율: %{customdata[1]:.2f}%<extra></extra>',
-        customdata=[[count, (count / total_population * 100) if total_population > 0 else 0] 
-                    for count in female_counts]
+        y=all_ages, x=female_counts, name="여자", orientation="h",
+        marker=dict(color="rgba(255, 127, 14, 0.8)"),
+        hovertemplate="<b>여자</b><br>연령: %{y}세<br>인구수: %{customdata[0]:,}명<br>비율: %{customdata[1]:.2f}%<extra></extra>",
+        customdata=[[c, (c / total_population * 100) if total_population > 0 else 0] for c in female_counts],
     ))
-    
-    # 레이아웃 설정
     max_abs_value = max(max(abs(m) for m in male_counts), max(female_counts)) if male_counts or female_counts else 1
-    
-    # X축 설정: 절대값으로 표시
-    tick_vals = []
-    tick_texts = []
     step = max(1, int(max_abs_value / 10))
-    for i in range(-int(max_abs_value), int(max_abs_value) + step, step):
-        tick_vals.append(i)
-        tick_texts.append(str(abs(i)))
-    
+    tick_vals = list(range(-int(max_abs_value), int(max_abs_value) + step, step))
+    tick_texts = [str(abs(i)) for i in tick_vals]
     fig.update_layout(
-        xaxis=dict(
-            title="인구수 (명)",
-            tickvals=tick_vals,
-            ticktext=tick_texts,
-            range=[-max_abs_value * 1.1, max_abs_value * 1.1]
-        ),
-        yaxis=dict(
-            title="연령 (세)"
-            # autorange='reversed' 제거: 아래가 젊은 나이, 위가 많은 나이
-        ),
-        barmode='overlay',
-        height=300,  # 2x3 그리드에 맞게 높이 조정
+        xaxis=dict(title="인구수 (명)", tickvals=tick_vals, ticktext=tick_texts, range=[-max_abs_value * 1.1, max_abs_value * 1.1]),
+        yaxis=dict(title="연령 (세)"),
+        barmode="overlay",
+        height=300,
         margin=dict(l=50, r=50, t=20, b=30),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
-        hovermode='closest'
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="closest",
     )
-    
+    return fig
+
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS, hash_funcs={pd.DataFrame: _hash_dataframe})
+def _build_chart_figures(df: pd.DataFrame, step2_columns_tuple: Tuple[str, ...], step2_only: bool) -> Dict[str, Any]:
+    """6축 + 2단계 추가 통계용 Plotly Figure들 생성 (캐시됨). 반환: axes dict + step2 list."""
+    import plotly.graph_objects as go
+
+    out = {"region": None, "gender": None, "pyramid": None, "econ": None, "edu": None, "income": None, "step2": []}
+    step2_columns = list(step2_columns_tuple)
+
+    if not step2_only:
+        if "거주지역" in df.columns:
+            region_counts = df["거주지역"].value_counts()
+            max_count = region_counts.max()
+            colors = [f"rgba(31, 119, 180, {0.3 + 0.7 * (c / max_count)})" for c in region_counts.values]
+            fig = go.Figure(data=[go.Bar(x=region_counts.index, y=region_counts.values, marker_color=colors, text=region_counts.values, textposition="auto")])
+            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            out["region"] = fig
+        if "성별" in df.columns:
+            gender_counts = df["성별"].value_counts()
+            max_count = gender_counts.max()
+            colors = [f"rgba(255, 127, 14, {0.3 + 0.7 * (c / max_count)})" for c in gender_counts.values]
+            fig = go.Figure(data=[go.Bar(x=gender_counts.index, y=gender_counts.values, marker_color=colors, text=gender_counts.values, textposition="auto")])
+            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            out["gender"] = fig
+        out["pyramid"] = _build_population_pyramid_figure(df)
+        if "경제활동" in df.columns:
+            econ_counts = df["경제활동"].value_counts()
+            max_count = econ_counts.max()
+            colors = [f"rgba(214, 39, 40, {0.3 + 0.7 * (c / max_count)})" for c in econ_counts.values]
+            fig = go.Figure(data=[go.Bar(x=econ_counts.index, y=econ_counts.values, marker_color=colors, text=econ_counts.values, textposition="auto")])
+            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            out["econ"] = fig
+        if "교육정도" in df.columns:
+            edu_counts = df["교육정도"].value_counts()
+            max_count = edu_counts.max()
+            colors = [f"rgba(148, 103, 189, {0.3 + 0.7 * (c / max_count)})" for c in edu_counts.values]
+            fig = go.Figure(data=[go.Bar(x=edu_counts.index, y=edu_counts.values, marker_color=colors, text=edu_counts.values, textposition="auto")])
+            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            out["edu"] = fig
+        if "월평균소득" in df.columns:
+            income_counts = df["월평균소득"].value_counts()
+            income_order = ["50만원미만", "50-100만원", "100-200만원", "200-300만원", "300-400만원", "400-500만원", "500-600만원", "600-700만원", "700-800만원", "800만원이상"]
+            income_sorted = income_counts.reindex([i for i in income_order if i in income_counts.index], fill_value=0)
+            max_count = income_sorted.max() if len(income_sorted) > 0 else 1
+            colors = [f"rgba(140, 86, 75, {0.3 + 0.7 * (c / max_count)})" for c in income_sorted.values]
+            fig = go.Figure(data=[go.Bar(x=income_sorted.index, y=income_sorted.values, marker_color=colors, text=income_sorted.values, textposition="auto")])
+            fig.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="", yaxis_title="인구수")
+            out["income"] = fig
+
+    for idx, col_name in enumerate(step2_columns):
+        if col_name not in df.columns:
+            out["step2"].append((col_name, None))
+            continue
+        counts = df[col_name].value_counts()
+        if counts.empty or len(counts) == 0:
+            out["step2"].append((col_name, None))
+            continue
+        fig = go.Figure(data=[
+            go.Bar(x=counts.index.astype(str), y=counts.values, text=counts.values, textposition="auto", marker_color="rgba(44, 160, 44, 0.7)")
+        ])
+        fig.update_layout(height=280, margin=dict(l=0, r=0, t=5, b=80), xaxis_title="", yaxis_title="인구수", xaxis_tickangle=-45)
+        out["step2"].append((col_name, fig))
+    return out
+
+
+def draw_population_pyramid(df: pd.DataFrame):
+    """인구 피라미드 렌더링. Figure는 캐시된 _build_population_pyramid_figure 사용."""
+    fig = _build_population_pyramid_figure(df)
+    if fig is None:
+        st.info("성별 또는 연령 데이터가 없습니다.")
+        return
     st.plotly_chart(fig, use_container_width=True, key="pyramid_main")
 
 
 def draw_charts(df: pd.DataFrame, step2_columns: Optional[List[str]] = None, step2_only: bool = False):
-    """6축 그래프 + 2단계 추가 통계 분포 렌더링. step2_only=True면 추가 통계만 표시."""
-    import plotly.graph_objects as go
-    
-    step2_columns = step2_columns or []
-    
-    # 2단계 전용 모드가 아니면 6축 그래프 표시
+    """6축 그래프 + 2단계 추가 통계 분포 렌더링. Figure는 캐시된 _build_chart_figures 사용."""
+    step2_cols = step2_columns or []
+    figures = _build_chart_figures(df, tuple(step2_cols), step2_only)
+
     if not step2_only:
-        st.markdown("### 6축 분포 그래프")
+        st.markdown("### 인구통계 그래프")
         row1_col1, row1_col2 = st.columns(2)
         row2_col1, row2_col2 = st.columns(2)
         row3_col1, row3_col2 = st.columns(2)
-        
-        # 1행: 거주지역, 성별
+
         with row1_col1:
             st.markdown("**거주지역**")
-            if "거주지역" in df.columns:
-                region_counts = df["거주지역"].value_counts()
-                max_count = region_counts.max()
-                colors = [f'rgba(31, 119, 180, {0.3 + 0.7 * (count / max_count)})' 
-                        for count in region_counts.values]
-                
-                fig = go.Figure(data=[
-                    go.Bar(x=region_counts.index, y=region_counts.values, 
-                        marker_color=colors, text=region_counts.values, textposition='auto')
-                ])
-                fig.update_layout(
-                    height=300,
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    xaxis_title="",
-                    yaxis_title="인구수"
-                )
-                st.plotly_chart(fig, use_container_width=True, key="chart_region")
+            if figures["region"] is not None:
+                st.plotly_chart(figures["region"], use_container_width=True, key="chart_region")
             else:
                 st.info("거주지역 데이터가 없습니다.")
-        
+
         with row1_col2:
             st.markdown("**성별**")
-            if "성별" in df.columns:
-                gender_counts = df["성별"].value_counts()
-                max_count = gender_counts.max()
-                colors = ['rgba(255, 127, 14, {})'.format(0.3 + 0.7 * (count / max_count)) 
-                        for count in gender_counts.values]
-                
-                fig = go.Figure(data=[
-                    go.Bar(x=gender_counts.index, y=gender_counts.values, 
-                        marker_color=colors, text=gender_counts.values, textposition='auto')
-                ])
-                fig.update_layout(
-                    height=300,
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    xaxis_title="",
-                    yaxis_title="인구수"
-                )
-                st.plotly_chart(fig, use_container_width=True, key="chart_gender")
+            if figures["gender"] is not None:
+                st.plotly_chart(figures["gender"], use_container_width=True, key="chart_gender")
             else:
                 st.info("성별 데이터가 없습니다.")
-        
-        # 2행: 연령 (인구 피라미드), 경제활동
+
         with row2_col1:
             st.markdown("**연령 (인구 피라미드)**")
-            if "연령" in df.columns and "성별" in df.columns:
-                draw_population_pyramid(df)
+            if figures["pyramid"] is not None:
+                st.plotly_chart(figures["pyramid"], use_container_width=True, key="pyramid_main")
             else:
                 st.info("연령 또는 성별 데이터가 없습니다.")
-        
+
         with row2_col2:
             st.markdown("**경제활동**")
-            if "경제활동" in df.columns:
-                econ_counts = df["경제활동"].value_counts()
-                max_count = econ_counts.max()
-                colors = ['rgba(214, 39, 40, {})'.format(0.3 + 0.7 * (count / max_count)) 
-                        for count in econ_counts.values]
-                
-                fig = go.Figure(data=[
-                    go.Bar(x=econ_counts.index, y=econ_counts.values, 
-                        marker_color=colors, text=econ_counts.values, textposition='auto')
-                ])
-                fig.update_layout(
-                    height=300,
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    xaxis_title="",
-                    yaxis_title="인구수"
-                )
-                st.plotly_chart(fig, use_container_width=True, key="chart_econ")
+            if figures["econ"] is not None:
+                st.plotly_chart(figures["econ"], use_container_width=True, key="chart_econ")
             else:
                 st.info("경제활동 데이터가 없습니다.")
-        
-        # 3행: 교육정도, 월평균소득
+
         with row3_col1:
             st.markdown("**교육정도**")
-            if "교육정도" in df.columns:
-                edu_counts = df["교육정도"].value_counts()
-                max_count = edu_counts.max()
-                colors = ['rgba(148, 103, 189, {})'.format(0.3 + 0.7 * (count / max_count)) 
-                        for count in edu_counts.values]
-                
-                fig = go.Figure(data=[
-                    go.Bar(x=edu_counts.index, y=edu_counts.values, 
-                        marker_color=colors, text=edu_counts.values, textposition='auto')
-                ])
-                fig.update_layout(
-                    height=300,
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    xaxis_title="",
-                    yaxis_title="인구수"
-                )
-                st.plotly_chart(fig, use_container_width=True, key="chart_edu")
+            if figures["edu"] is not None:
+                st.plotly_chart(figures["edu"], use_container_width=True, key="chart_edu")
             else:
                 st.info("교육정도 데이터가 없습니다.")
-        
+
         with row3_col2:
             st.markdown("**월평균소득**")
-            if "월평균소득" in df.columns:
-                income_counts = df["월평균소득"].value_counts()
-                income_order = ["50만원미만", "50-100만원", "100-200만원", "200-300만원", 
-                            "300-400만원", "400-500만원", "500-600만원", "600-700만원", 
-                            "700-800만원", "800만원이상"]
-                income_sorted = income_counts.reindex([i for i in income_order if i in income_counts.index], fill_value=0)
-                max_count = income_sorted.max() if len(income_sorted) > 0 else 1
-                colors = ['rgba(140, 86, 75, {})'.format(0.3 + 0.7 * (count / max_count)) 
-                        for count in income_sorted.values]
-                
-                fig = go.Figure(data=[
-                    go.Bar(x=income_sorted.index, y=income_sorted.values, 
-                        marker_color=colors, text=income_sorted.values, textposition='auto')
-                ])
-                fig.update_layout(
-                    height=300,
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    xaxis_title="",
-                    yaxis_title="인구수"
-                )
-                st.plotly_chart(fig, use_container_width=True, key="chart_income")
+            if figures["income"] is not None:
+                st.plotly_chart(figures["income"], use_container_width=True, key="chart_income")
             else:
                 st.info("월평균소득 데이터가 없습니다.")
-    
-    # 2단계 추가 통계 분포 (해당 데이터 기반)
-    if step2_columns:
+
+    if step2_cols:
         if not step2_only:
             st.markdown("---")
-        if not step2_only:
             st.markdown("### 2단계 추가 통계 분포")
-        # 2열 그리드로 추가 통계 막대 그래프
-        for i in range(0, len(step2_columns), 2):
+        for i in range(0, len(step2_cols), 2):
             cols = st.columns(2)
             for j, col_widget in enumerate(cols):
                 idx = i + j
-                if idx >= len(step2_columns):
+                if idx >= len(step2_cols):
                     break
-                col_name = step2_columns[idx]
+                col_name, fig = figures["step2"][idx]
                 with col_widget:
                     st.markdown(f"**{col_name}**")
-                    counts = df[col_name].value_counts()
-                    if counts.empty or len(counts) == 0:
+                    if fig is not None:
+                        st.plotly_chart(fig, use_container_width=True, key=f"chart_step2_{idx}")
+                    else:
                         st.caption("데이터 없음")
-                        continue
-                    fig = go.Figure(data=[
-                        go.Bar(x=counts.index.astype(str), y=counts.values,
-                               text=counts.values, textposition="auto",
-                               marker_color="rgba(44, 160, 44, 0.7)")
-                    ])
-                    fig.update_layout(
-                        height=280,
-                        margin=dict(l=0, r=0, t=5, b=80),
-                        xaxis_title="",
-                        yaxis_title="인구수",
-                        xaxis_tickangle=-45,
-                    )
-                    st.plotly_chart(fig, use_container_width=True, key=f"chart_step2_{idx}")
 
 
 def _get_result_df():
@@ -1383,7 +1326,7 @@ def build_step2_error_report(
         if not url or not columns:
             continue
         try:
-            kosis_data = kosis_client.fetch_json(url)
+            kosis_data = get_cached_kosis_json(url)
         except Exception:
             continue
         if not isinstance(kosis_data, list):
@@ -1704,6 +1647,44 @@ def page_generate():
         
         st.markdown("---")
 
+        # 지도: 가상인구 DB와 동일 Choropleth, 지도 클릭 시 시도 선택과 양방향 연동
+        from pages.virtual_population_db import _build_korea_choropleth_figure
+        _gen_sido_default = f"{list(SIDO_CODE.values())[0]} ({list(SIDO_CODE.keys())[0]})"
+        # 지도 클릭 선택 처리 → gen_sido 갱신 (양방향 바인딩)
+        _map_state = st.session_state.get("gen_sido_map")
+        _sel = None
+        if _map_state is not None:
+            _sel = _map_state.get("selection") if isinstance(_map_state, dict) else getattr(_map_state, "selection", None)
+        _pts = []
+        if _sel is not None:
+            _pts = _sel.get("points", []) if isinstance(_sel, dict) else (getattr(_sel, "points", None) or [])
+        if not _pts and isinstance(_sel, dict) and _sel.get("locations"):
+            _pts = [{"location": loc} if isinstance(loc, (str, int, float)) else loc for loc in (_sel.get("locations") or [])]
+        if _pts:
+            _p0 = _pts[0] if isinstance(_pts[0], dict) else (getattr(_pts[0], "__dict__", None) or {})
+            _cd = _p0.get("customdata") or _p0.get("customData")
+            _loc_id = _p0.get("location")
+            _code = None
+            if _cd and (isinstance(_cd, (list, tuple)) and len(_cd) > 0):
+                _code = str(_cd[0])
+            elif isinstance(_cd, (str, int, float)):
+                _code = str(_cd)
+            if not _code and _loc_id is not None:
+                _code = str(_loc_id)
+            if not _code:
+                _pi = _p0.get("point_index") or _p0.get("pointIndex")
+                if _pi is not None:
+                    _sidos_ordered = [s["sido_code"] for s in SIDO_MASTER if s["sido_code"] != "00"]
+                    if 0 <= _pi < len(_sidos_ordered):
+                        _code = str(_sidos_ordered[_pi])
+            if _code and _code in SIDO_CODE_TO_NAME:
+                st.session_state["gen_sido"] = f"{SIDO_CODE_TO_NAME[_code]} ({_code})"
+        _gen_sido_label = st.session_state.get("gen_sido", _gen_sido_default)
+        _gen_sido_code = _gen_sido_label.split("(")[-1].rstrip(")").strip()
+        _region_stats = get_sido_vdb_stats()
+        _gen_fig = _build_korea_choropleth_figure(_gen_sido_code, _region_stats)
+        st.plotly_chart(_gen_fig, key="gen_sido_map", use_container_width=True, on_select="rerun", selection_mode="points")
+
         # 1) 시도 선택
         selected_label = st.selectbox(
             "시도 선택",
@@ -1824,58 +1805,24 @@ def page_generate():
                             st.error("기본 인구 생성 실패")
                             st.stop()
 
-                        # ✅ 오차율 검증 및 재생성 로직
-                        max_retries = 5
-                        retry_count = 0
-                        avg_mae = 100.0  # 초기값
-                        
-                        while retry_count < max_retries:
-                            # 오차율 계산
-                            if margins_axis:
-                                avg_mae, error_report = calculate_mape(base_df, margins_axis)
-                                avg_mae_pct = avg_mae * 100
-                                
-                                if avg_mae_pct < 5.0:
-                                    # 오차율이 5.0% 미만이면 통과
-                                    break
-                                else:
-                                    # 오차율이 5.0% 이상이면 재생성
-                                    retry_count += 1
-                                    if retry_count < max_retries:
-                                        st.warning(f"평균 오차율 {avg_mae_pct:.2f}% (목표: 5.0% 미만) - {retry_count}회차 재생성 중...")
-                                        # 재생성 시 다른 결과를 위해 시드 변경
-                                        seed = base_seed + retry_count
-                                        base_df = cached_generate_base_population(
-                                            n=int(n),
-                                            selected_sigungu_json=json.dumps([], sort_keys=True),
-                                            weights_6axis_json=json.dumps({
-                                                'sigungu': w_sigungu, 'gender': w_gender, 'age': w_age,
-                                                'econ': w_econ, 'income': w_income, 'edu': w_edu,
-                                            }, sort_keys=True),
-                                            sigungu_pool_json=json.dumps(sigungu_pool, sort_keys=True),
-                                            seed=seed,
-                                            margins_axis_json=json.dumps(margins_axis if margins_axis else {}, sort_keys=True, default=str),
-                                            apply_ipf_flag=True,
-                                        )
-                                    else:
-                                        st.warning(f"최대 재시도 횟수({max_retries}회) 도달. 현재 오차율: {avg_mae_pct:.2f}%")
-                            else:
-                                # margins_axis가 없으면 검증 스킵
-                                break
-                        
-                        if margins_axis and avg_mae * 100 < 5.0:
-                            st.success(f"KOSIS 통계 기반 {len(base_df)}명 생성 완료 (평균 오차율: {avg_mae * 100:.2f}%)")
+                        # 오차율 계산 (1회만, Blocking 반복 제거)
+                        avg_mae_pct = 0.0
+                        if margins_axis:
+                            avg_mae, error_report = calculate_mape(base_df, margins_axis)
+                            avg_mae_pct = avg_mae * 100
+
+                        if margins_axis and avg_mae_pct < 5.0:
+                            st.success(f"KOSIS 통계 기반 {len(base_df)}명 생성 완료 (평균 오차율: {avg_mae_pct:.2f}%)")
                         else:
                             st.success(f"KOSIS 통계 기반 {len(base_df)}명 생성 완료")
+                            if margins_axis and avg_mae_pct >= 5.0:
+                                st.warning(
+                                    f"오차율이 다소 높습니다({avg_mae_pct:.2f}%). "
+                                    "더 정교한 결과를 원하시면 **다시 생성** 버튼을 눌러주세요."
+                                )
 
-                    # Excel 생성: 기본 컬럼 + 추후 2단계에서 추가 통계는 오른쪽에 열로 이어 붙임
-                    out_buffer = io.BytesIO()
-                    base_df.to_excel(out_buffer, index=False, engine="openpyxl")
-                    out_buffer.seek(0)
-                    xbytes = out_buffer.getvalue()
-
-                    # 세션에 저장
-                    st.session_state["generated_excel"] = xbytes
+                    # Excel은 다운로드 탭에서 요청 시 캐시된 함수로 생성(지연 변환)
+                    st.session_state["generated_excel"] = None
                     st.session_state["generated_df"] = base_df
                     st.session_state["step1_df"] = base_df  # step1_df도 저장 (오토세이브용)
                     st.session_state["step1_completed"] = True
@@ -2715,8 +2662,8 @@ def page_generate():
                                             # 행 방향 논리 일관성 정리 (비경제활동 → 직장/직업/근로만족도 비움, 미성년 → 배우자 경제활동 무)
                                             result_df = apply_step2_row_consistency(result_df)
                                             
-                                            # 개연성 적용 (inplace)
-                                            _apply_step2_logical_consistency(result_df)
+                                            # 개연성 적용 (캐시된 함수로 1회 계산 결과 재사용)
+                                            result_df = _apply_step2_logical_consistency_cached(result_df)
                                             # 결과 저장 (내부 컬럼명 유지하여 검증 등에서 사용)
                                             st.session_state["step2_df"] = result_df
                                             st.session_state["generated_df"] = result_df
@@ -2906,21 +2853,15 @@ def _fragment_result_tabs():
             st.markdown("### 생성된 데이터 미리보기")
         df_preview = _apply_step2_column_rename(df.copy()) if is_step2 else df
         st.dataframe(df_preview.head(100), height=400, use_container_width=True)
-    # [탭 4] 다운로드
+    # [탭 4] 다운로드 (탭 진입 시에만 캐시된 함수로 Excel 변환)
     with tabs[4]:
         st.markdown("### 다운로드")
         df_export = _apply_step2_column_rename(df.copy()) if is_step2 else df
-        final_excel_bytes = None
         try:
-            import io
-            buf = io.BytesIO()
-            df_export.to_excel(buf, index=False, engine="openpyxl")
-            buf.seek(0)
-            final_excel_bytes = buf.getvalue()
-            st.session_state["generated_excel"] = final_excel_bytes
+            final_excel_bytes = _build_excel_bytes_for_download(df_export, is_step2)
         except Exception as e:
             st.warning(f"Excel 생성 실패: {e}")
-            final_excel_bytes = st.session_state.get("generated_excel")
+            final_excel_bytes = None
         if final_excel_bytes:
             col_dl1, col_dl2 = st.columns(2)
             with col_dl1:
@@ -2944,16 +2885,28 @@ def _fragment_result_tabs():
 
 
 def page_step2_results():
-    """2차 대입 결과: 날짜/시간별 기록 조회, 데이터 보기, 삭제(서버 파일까지 삭제). 여러 건 선택 후 일괄 삭제 가능."""
+    """2차 대입 결과: 날짜/시간별 기록 조회, 데이터 보기, 삭제(서버 파일까지 삭제). 여러 건 선택 후 일괄 삭제 가능. 페이지네이션(10건/페이지)."""
     from utils.step2_records import list_step2_records, delete_step2_record
     st.header("2차 대입 결과")
     records = list_step2_records()
     if not records:
         st.info("아직 2차 대입 결과가 없습니다. 가상인구 생성 후 2단계에서 통계를 대입하면 여기에 저장됩니다.")
         return
+    # 페이지네이션: 한 페이지당 10건
+    PER_PAGE = 10
+    total_pages = max(1, (len(records) + PER_PAGE - 1) // PER_PAGE)
+    if "step2_page" not in st.session_state:
+        st.session_state["step2_page"] = 0
+    current_page = min(max(0, st.session_state["step2_page"]), total_pages - 1)
+    st.session_state["step2_page"] = current_page
+    start = current_page * PER_PAGE
+    end = min(start + PER_PAGE, len(records))
+    page_records = records[start:end]
+
     st.caption(f"총 {len(records)}건 (날짜·시간순). 삭제 시 서버의 Excel·메타 파일이 함께 삭제됩니다.")
     st.markdown("**삭제할 항목을 체크한 뒤 아래 [선택한 항목 삭제] 버튼을 누르면 한 번에 삭제됩니다.**")
-    for idx, r in enumerate(records):
+    for i, r in enumerate(page_records):
+        idx = start + i
         ts = r.get("timestamp", "")
         sido_name = r.get("sido_name", "")
         rows = r.get("rows", 0)
@@ -2963,22 +2916,45 @@ def page_step2_results():
         with st.expander(row_label):
             st.checkbox("이 항목 삭제에 포함", key=f"step2_del_cb_{idx}")
             st.caption(f"추가된 컬럼: {', '.join(added[:8])}{' ...' if len(added) > 8 else ''}")
-            try:
-                df = pd.read_excel(excel_path, engine="openpyxl")
-                st.dataframe(df.head(100), use_container_width=True, height=300)
-            except Exception as e:
-                st.warning(f"데이터 로드 실패: {e}")
-            col_dl, col_del = st.columns([1, 1])
-            with col_dl:
-                with open(excel_path, "rb") as f:
-                    st.download_button("Excel 다운로드", data=f.read(), file_name=os.path.basename(excel_path), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_{ts}_{r.get('sido_code','')}_{idx}")
-            with col_del:
-                if st.button("이 항목만 삭제", key=f"del_step2_{ts}_{r.get('sido_code','')}_{idx}", type="secondary"):
-                    if delete_step2_record(excel_path):
-                        st.success("해당 2차 대입 결과와 서버 파일을 삭제했습니다.")
-                    else:
-                        st.error("삭제에 실패했습니다.")
-                    st.rerun()
+            # 지연 로딩: 버튼 클릭 시에만 엑셀 로드 (페이지 마비 방지)
+            preview_key = f"step2_show_preview_{idx}"
+            df_cache_key = f"step2_preview_df_{idx}"
+            if st.button("데이터 미리보기", key=f"step2_preview_btn_{idx}", type="secondary"):
+                st.session_state[preview_key] = True
+            if st.session_state.get(preview_key):
+                if df_cache_key not in st.session_state:
+                    try:
+                        st.session_state[df_cache_key] = pd.read_excel(excel_path, engine="openpyxl")
+                    except Exception as e:
+                        st.warning(f"데이터 로드 실패: {e}")
+                if df_cache_key in st.session_state:
+                    st.dataframe(st.session_state[df_cache_key].head(100), use_container_width=True, height=300)
+                col_dl, col_del = st.columns([1, 1])
+                with col_dl:
+                    with open(excel_path, "rb") as f:
+                        st.download_button("Excel 다운로드", data=f.read(), file_name=os.path.basename(excel_path), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_{ts}_{r.get('sido_code','')}_{idx}")
+                with col_del:
+                    if st.button("이 항목만 삭제", key=f"del_step2_{ts}_{r.get('sido_code','')}_{idx}", type="secondary"):
+                        if delete_step2_record(excel_path):
+                            st.success("해당 2차 대입 결과와 서버 파일을 삭제했습니다.")
+                        else:
+                            st.error("삭제에 실패했습니다.")
+                        st.rerun()
+
+    # 페이지 네비게이션
+    if total_pages > 1:
+        st.markdown("---")
+        col_prev, col_info, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("← 이전", key="step2_prev_page", disabled=(current_page == 0)):
+                st.session_state["step2_page"] = current_page - 1
+                st.rerun()
+        with col_info:
+            st.caption(f"**{start + 1}–{end}** / {len(records)}건 (페이지 {current_page + 1}/{total_pages})")
+        with col_next:
+            if st.button("다음 →", key="step2_next_page", disabled=(current_page >= total_pages - 1)):
+                st.session_state["step2_page"] = current_page + 1
+                st.rerun()
 
     # 선택한 항목 일괄 삭제
     selected_paths = []

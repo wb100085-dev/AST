@@ -1,5 +1,6 @@
 """
-분석 페이지(result_analysis_*) 공통 UI: 2차 대입 데이터 선택 체크박스·에러 메시지
+분석 페이지(result_analysis_*) 공통 UI: 시장성 조사 설문 응답 결과 데이터 선택
+(기존 2차 대입 결과 대신 설문 응답에 참여한 가상인구 데이터 사용)
 """
 from __future__ import annotations
 
@@ -8,8 +9,6 @@ from typing import Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-
-from utils.step2_records import list_step2_records, load_step2_record
 
 
 def show_package_required_error(
@@ -48,85 +47,81 @@ pip install {pip_install_name}
     return False
 
 
-def render_step2_data_selector(
+def _survey_latest_panel_path() -> Optional[str]:
+    """시장성 조사 설문 응답 결과(가상인구 패널) 저장 경로. 없으면 None."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "data", "survey_latest", "panel.csv")
+    return path if os.path.isfile(path) else None
+
+
+def render_survey_response_data_selector(
     session_key_prefix: str,
-    info_when_no_records: str = "아직 2차 대입 결과가 없습니다. 가상인구 생성 후 2단계에서 통계를 대입하면 여기서 불러올 수 있습니다.",
-    info_when_unchecked: str = "가상 데이터를 사용합니다. 2차 대입 결과를 사용하려면 위 체크박스를 선택하세요.",
+    info_when_no_records: str = "시장성 조사 설계에서 **AI 설문 진행**을 실행한 뒤, 여기서 설문 응답에 참여한 가상인구 데이터를 불러올 수 있습니다.",
+    info_when_unchecked: str = "가상 데이터를 사용합니다. 설문 응답 결과 데이터를 사용하려면 위 체크박스를 선택하세요.",
     show_preview: bool = True,
     preview_caption: Optional[str] = None,
     show_preview_row_count: bool = False,
 ) -> Tuple[bool, Optional[pd.DataFrame]]:
     """
-    2차 대입 결과 '데이터 선택 체크박스' + selectbox + 로드 결과를 한 번에 렌더링.
+    시장성 조사 설문 응답 결과 데이터(응답 참여 가상인구) 선택 UI.
     반환: (use_real_data, real_data_df 또는 None)
-
-    session_key_prefix: 스트림릿 key 접두사 (예: "bass", "psm", "conjoint", "statcheck")
     """
-    st.markdown("### 가상인구 데이터 불러오기")
-    records = list_step2_records()
-
+    st.markdown("### AI설문 응답 결과 불러오기")
+    panel_path = _survey_latest_panel_path()
     use_real_data = False
     real_data_df: Optional[pd.DataFrame] = None
 
-    if not records:
+    if not panel_path:
         st.info(info_when_no_records)
         return False, None
 
-    record_options: dict = {}
-    for r in records:
-        ts = r.get("timestamp", "")
-        sido_name = r.get("sido_name", "")
-        rows = r.get("rows", 0)
-        cols = r.get("columns_count", 0)
-        label = f"{ts} | {sido_name} | {rows}명 | {cols}개 컬럼"
-        record_options[label] = r
-
     use_real_data_option = st.checkbox(
-        "2차 대입 결과 데이터 사용",
+        "시장성 조사 설문 응답 결과 데이터 사용",
         value=False,
-        key=f"{session_key_prefix}_use_real_data",
+        key=f"{session_key_prefix}_use_survey_data",
     )
 
     if use_real_data_option:
-        selected_label_key = f"{session_key_prefix}_selected_record_label"
-        keys_list = list(record_options.keys())
-        default_index = 0
-        if st.session_state.get(selected_label_key) and st.session_state[selected_label_key] in record_options:
-            default_index = keys_list.index(st.session_state[selected_label_key])
-
-        selected_label = st.selectbox(
-            "2차 대입 결과에서 가상인구 데이터를 선택하세요:",
-            options=keys_list,
-            index=default_index,
-            key=f"{session_key_prefix}_record_select",
-        )
-
-        if selected_label and selected_label in record_options:
-            selected_record = record_options[selected_label]
-            excel_path = selected_record.get("excel_path", "")
-
-            if not excel_path or not os.path.isfile(excel_path):
-                st.warning("선택한 데이터 파일을 찾을 수 없습니다.")
-            else:
-                try:
-                    real_data_df = load_step2_record(excel_path)
-                    st.session_state[f"{session_key_prefix}_population_df"] = real_data_df
-                    st.session_state[selected_label_key] = selected_label
-                    use_real_data = True
-                    st.success(
-                        f"✅ 가상인구 데이터를 불러왔습니다. (총 {len(real_data_df)}명, {len(real_data_df.columns)}개 컬럼)"
-                    )
-                    if show_preview:
-                        with st.expander("불러온 데이터 미리보기"):
-                            st.dataframe(real_data_df.head(20), use_container_width=True, height=300)
-                            if preview_caption:
-                                st.caption(preview_caption)
-                            elif show_preview_row_count:
-                                st.caption(f"전체 {len(real_data_df)}명 중 처음 20명 표시")
-                except Exception as e:
-                    st.error(f"데이터 로드 실패: {e}")
+        try:
+            real_data_df = pd.read_csv(panel_path, encoding="utf-8-sig")
+            st.session_state[f"{session_key_prefix}_population_df"] = real_data_df
+            use_real_data = True
+            st.success(
+                f"✅ 설문 응답에 참여한 가상인구 데이터를 불러왔습니다. (총 {len(real_data_df)}명, {len(real_data_df.columns)}개 컬럼)"
+            )
+            if show_preview:
+                with st.expander("불러온 데이터 미리보기"):
+                    st.dataframe(real_data_df.head(20), use_container_width=True, height=300)
+                    if preview_caption:
+                        st.caption(preview_caption)
+                    elif show_preview_row_count:
+                        st.caption(f"전체 {len(real_data_df)}명 중 처음 20명 표시")
+        except Exception as e:
+            st.error(f"데이터 로드 실패: {e}")
     else:
         st.session_state[f"{session_key_prefix}_population_df"] = None
         st.info(info_when_unchecked)
 
     return use_real_data, real_data_df
+
+
+def render_step2_data_selector(
+    session_key_prefix: str,
+    info_when_no_records: str = "시장성 조사 설계에서 **AI 설문 진행**을 실행한 뒤, 여기서 설문 응답 데이터를 불러올 수 있습니다.",
+    info_when_unchecked: str = "가상 데이터를 사용합니다. 설문 응답 결과 데이터를 사용하려면 위 체크박스를 선택하세요.",
+    show_preview: bool = True,
+    preview_caption: Optional[str] = None,
+    show_preview_row_count: bool = False,
+) -> Tuple[bool, Optional[pd.DataFrame]]:
+    """
+    분석 페이지용 데이터 선택. 시장성 조사 설문 응답 결과(가상인구 패널) 사용.
+    반환: (use_real_data, real_data_df 또는 None)
+    """
+    return render_survey_response_data_selector(
+        session_key_prefix=session_key_prefix,
+        info_when_no_records=info_when_no_records,
+        info_when_unchecked=info_when_unchecked,
+        show_preview=show_preview,
+        preview_caption=preview_caption,
+        show_preview_row_count=show_preview_row_count,
+    )

@@ -8,7 +8,7 @@ import re
 import streamlit as st
 import pandas as pd
 from pages.common import apply_common_styles, render_definition_block, render_needs_block
-from core.constants import SIDO_LABEL_TO_CODE, SIDO_CODE_TO_NAME
+from core.constants import SIDO_LABEL_TO_CODE, SIDO_CODE_TO_NAME, SIDO_MASTER, SIDO_TOTAL_POP
 from core.session_cache import get_sido_master
 
 
@@ -48,7 +48,7 @@ def _render_panel_summary_and_charts(panel_df, key_prefix: str = ""):
         st.metric("컬럼 수", len(df.columns))
 
     st.markdown("---")
-    st.markdown("#### 6축 분포 그래프")
+    st.markdown("#### 인구통계 그래프")
 
     # 생성 페이지와 동일: 색상 적용, 연령은 인구 피라미드(종모양)
     def _draw_population_pyramid_survey(_df, key_suffix: str):
@@ -908,6 +908,144 @@ def _generate_survey_report_analysis(hypotheses: list, questions: list[dict], re
         return {"상세분석": "(분석 생성 중 오류가 발생했습니다.)", "결과및전략": ""}
 
 
+def _find_korean_font_path():
+    """한글을 지원하는 TTF 폰트 경로 탐색 (Windows / Linux / 프로젝트 fonts)."""
+    import os
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = []
+    if os.name == "nt":
+        windir = os.environ.get("WINDIR", "C:\\Windows")
+        candidates.append(os.path.join(windir, "Fonts", "malgun.ttf"))
+        candidates.append(os.path.join(windir, "Fonts", "gulim.ttc"))
+    candidates.append(os.path.join(_root, "fonts", "NanumGothic.ttf"))
+    candidates.append(os.path.join(_root, "fonts", "NotoSansKR-Regular.ttf"))
+    candidates.append("/usr/share/fonts/truetype/nanum/NanumGothic.ttf")
+    candidates.append("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _build_survey_report_pdf_bytes(
+    overview_text: str,
+    questions: list,
+    results_by_q: list,
+    report_analysis: dict,
+    open_ended: dict,
+    n_respondents: int,
+    selected_sido_label: str,
+) -> bytes:
+    """설문 응답 결과 보고서를 PDF 바이트로 생성 (reportlab 사용, 한글 폰트 지원)."""
+    import io
+    from reportlab.lib.pagesizes import A4
+
+    def _escape(s: str) -> str:
+        if not s:
+            return ""
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle
+    from reportlab.lib import colors
+
+    # 한글 폰트 등록
+    pdf_font_name = "Helvetica"
+    font_path = _find_korean_font_path()
+    if font_path:
+        try:
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+            pdf_font_name = "KoreanReportFont"
+            pdfmetrics.registerFont(TTFont(pdf_font_name, font_path))
+        except Exception:
+            pdf_font_name = "Helvetica"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm, topMargin=20*mm, bottomMargin=20*mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(name="ReportTitle", parent=styles["Heading1"], fontSize=16, spaceAfter=12, fontName=pdf_font_name)
+    heading_style = ParagraphStyle(name="ReportHeading2", parent=styles["Heading2"], fontName=pdf_font_name)
+    heading3_style = ParagraphStyle(name="ReportHeading3", parent=styles["Heading3"], fontName=pdf_font_name)
+    body_style = ParagraphStyle(name="ReportBody", parent=styles["Normal"], fontName=pdf_font_name)
+
+    story = []
+    story.append(Paragraph("시장성 조사 설계 — 설문 응답 결과 보고서", title_style))
+    story.append(Spacer(1, 8*mm))
+
+    story.append(Paragraph("1. 설문지 — 조사 개요 및 전체 설문 문항", heading_style))
+    story.append(Spacer(1, 4*mm))
+    for line in (overview_text or "").strip().split("\n"):
+        line = line.strip()
+        if line:
+            line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", line)
+            story.append(Paragraph(line, body_style))
+    story.append(Spacer(1, 4*mm))
+    story.append(Paragraph("전체 설문 문항", heading3_style))
+    for i, q in enumerate((questions or [])[:25], 1):
+        typ = q.get("type", "객관식")
+        title = _escape((q.get("title", "") or "").strip()[:200])
+        question = _escape((q.get("question", "") or "").strip()[:500])
+        options = q.get("options") or []
+        opts_text = " / ".join([f"{j+1}. {_escape(str(o))}" for j, o in enumerate(options[:10])]) if options else "(주관식)"
+        story.append(Paragraph(f"<b>문항 {i}</b> [{typ}] {title}", body_style))
+        story.append(Paragraph(question, body_style))
+        story.append(Paragraph(opts_text, body_style))
+        story.append(Spacer(1, 2*mm))
+    story.append(PageBreak())
+
+    story.append(Paragraph("2. 설문결과 — 핵심 지표", heading_style))
+    story.append(Spacer(1, 4*mm))
+    for r in (results_by_q or [])[:25]:
+        story.append(Paragraph(f"<b>문항 {r.get('문항번호', '')}</b> {_escape(r.get('제목', ''))}", body_style))
+        story.append(Paragraph(_escape((r.get("질문", "") or "")[:300]), body_style))
+        dist = r.get("분포") or []
+        if dist:
+            table_data = [["선택지", "응답자수", "비율(%)"]]
+            for d in dist[:15]:
+                table_data.append([
+                    str(d.get("선택지", ""))[:50],
+                    str(d.get("응답자수", "")),
+                    str(d.get("비율(%)", "")),
+                ])
+            t = Table(table_data)
+            t.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), pdf_font_name), ("FONTSIZE", (0, 0), (-1, -1), 8), ("GRID", (0, 0), (-1, -1), 0.5, colors.grey)]))
+            story.append(t)
+        if r.get("평균점수") is not None:
+            story.append(Paragraph(f"평균점수: {r['평균점수']}", body_style))
+        story.append(Spacer(1, 4*mm))
+    story.append(PageBreak())
+
+    story.append(Paragraph("3. 상세분석", heading_style))
+    story.append(Spacer(1, 4*mm))
+    detail = (report_analysis or {}).get("상세분석") or "(내용 없음)"
+    for para in (detail or "").strip().split("\n\n")[:30]:
+        if para.strip():
+            story.append(Paragraph(_escape(para.strip()[:1500]), body_style))
+            story.append(Spacer(1, 2*mm))
+    story.append(Spacer(1, 4*mm))
+    story.append(Paragraph("4. 결론 및 시사점", heading_style))
+    story.append(Spacer(1, 4*mm))
+    strategy = (report_analysis or {}).get("결과및전략") or "(내용 없음)"
+    for para in (strategy or "").strip().split("\n\n")[:20]:
+        if para.strip():
+            story.append(Paragraph(_escape(para.strip()[:1500]), body_style))
+            story.append(Spacer(1, 2*mm))
+    if open_ended:
+        story.append(PageBreak())
+        story.append(Paragraph("5. 주관식 응답 — 핵심 응답 TOP 5", heading_style))
+        story.append(Spacer(1, 4*mm))
+        for q_num, data in list(open_ended.items())[:10]:
+            story.append(Paragraph(f"<b>문항 {q_num}</b> {_escape(data.get('제목', ''))}", body_style))
+            if data.get("응답목록"):
+                for rank, text in enumerate((data["응답목록"] or [])[:5], 1):
+                    story.append(Paragraph(f"{rank}. {_escape(str(text)[:300])}", body_style))
+            story.append(Spacer(1, 2*mm))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
 def _extract_text_from_pdf(pdf_file) -> str:
     """PDF 파일에서 텍스트 추출 (pypdf 사용)."""
     try:
@@ -1131,6 +1269,29 @@ def _render_survey_subpage():
                 )
             else:
                 st.info("응답 원본 데이터가 없습니다.")
+
+        st.markdown("---")
+        st.markdown("#### 최종 보고서 저장")
+        try:
+            overview_text = _survey_overview_text(n_respondents, selected_sido_label, hypotheses or [])
+            pdf_bytes = _build_survey_report_pdf_bytes(
+                overview_text=overview_text,
+                questions=questions,
+                results_by_q=results_by_q,
+                report_analysis=report_analysis,
+                open_ended=open_ended,
+                n_respondents=n_respondents,
+                selected_sido_label=selected_sido_label,
+            )
+            st.download_button(
+                "PDF 파일로 저장",
+                data=pdf_bytes,
+                file_name="survey_report.pdf",
+                mime="application/pdf",
+                key="survey_pdf_download",
+            )
+        except Exception as e:
+            st.caption(f"PDF 생성 중 오류: {e}")
         return
 
     # 페이지 내 전환: AI 설문 진행 옵션 선택 (2분할: 왼쪽 지역/패널/지도, 오른쪽 가상인구 요약+그래프+버튼)
@@ -1180,8 +1341,24 @@ def _render_survey_subpage():
 
             st.markdown("**지도**")
             try:
-                from pages.virtual_population_db import _render_korea_map
-                _render_korea_map(selected_sido_code)
+                from core.db import get_sido_vdb_stats
+                from pages.virtual_population_db import _build_korea_choropleth_figure
+                try:
+                    vdb_stats = get_sido_vdb_stats()
+                except Exception:
+                    vdb_stats = {}
+                region_stats = {}
+                for s in SIDO_MASTER:
+                    if s.get("sido_code") == "00":
+                        continue
+                    code = s["sido_code"]
+                    region_stats[code] = {
+                        "sido_name": s.get("sido_name", ""),
+                        "vdb_count": vdb_stats.get(code, {}).get("vdb_count", 0),
+                        "total_pop": SIDO_TOTAL_POP.get(code),
+                    }
+                fig = _build_korea_choropleth_figure(selected_sido_code, region_stats)
+                st.plotly_chart(fig, key="survey_ai_sido_map", use_container_width=True)
             except Exception:
                 st.caption("지도를 불러올 수 없습니다.")
 
@@ -1206,6 +1383,17 @@ def _render_survey_subpage():
                         else:
                             st.session_state.survey_results_by_question = []
                             st.session_state.survey_report_analysis = {"상세분석": "", "결과및전략": ""}
+                        # 설문 응답 결과를 분석 페이지(컨조인트/PSM/Bass/A·B 테스트)에서 사용할 수 있도록 저장
+                        import os
+                        survey_latest_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "survey_latest")
+                        try:
+                            os.makedirs(survey_latest_dir, exist_ok=True)
+                            panel_path = os.path.join(survey_latest_dir, "panel.csv")
+                            response_path = os.path.join(survey_latest_dir, "responses.csv")
+                            panel_df.to_csv(panel_path, index=False, encoding="utf-8-sig")
+                            response_df.to_csv(response_path, index=False, encoding="utf-8-sig")
+                        except Exception:
+                            pass
                     st.session_state.survey_ai_flow_page = "ai_survey_conduct"
                     st.rerun()
             else:

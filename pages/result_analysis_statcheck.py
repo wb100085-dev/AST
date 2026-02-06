@@ -26,7 +26,7 @@ def page_statcheck():
 
     use_real_data, real_data_df = render_step2_data_selector(
         "statcheck",
-        info_when_unchecked="직접 입력 방식을 사용합니다. 2차 대입 결과를 사용하려면 위 체크박스를 선택하세요.",
+        info_when_unchecked="직접 입력 방식을 사용합니다. 설문 응답 결과 데이터를 사용하려면 위 체크박스를 선택하세요.",
     )
 
     st.markdown("---")
